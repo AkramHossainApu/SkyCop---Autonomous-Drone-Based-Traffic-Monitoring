@@ -91,7 +91,7 @@ export default function App() {
     <main className="app-shell">
       <header className="topbar">
         <a className="brand" href="#home" aria-label="SkyCop home">
-          <img src="/skycop-logo.svg" alt="SkyCop logo" className="brand-logo" />
+          <img src={`${import.meta.env.BASE_URL}skycop-logo.svg`} alt="SkyCop logo" className="brand-logo" />
           <span className="brand-name">SKYCOP<span className="brand-period">.</span></span>
         </a>
         <div className="topbar-center"><span className="topbar-line" /> FIELD STATION <span className="topbar-divider">/</span> CAMERA LIVE</div>
