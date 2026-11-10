@@ -1,4 +1,4 @@
-# SkyCop Camera Station
+# SkyCop
 
 The first SkyCop prototype milestone: request a device camera, show its local preview, and stop the camera cleanly. The traffic scene is an interactive 3D visualization; it is illustrative and does not represent live mapping or drone telemetry.
 
