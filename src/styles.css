@@ -87,6 +87,11 @@ h1 { margin: 19px 0 12px; font-family: var(--display); font-size: clamp(36px, 4.
 .session-button { flex: 1; display: inline-flex; justify-content: center; align-items: center; gap: 10px; min-height: 43px; padding: 0 15px; border: 1px solid var(--ink); color: #f5f5ef; background: var(--ink); font-size: 11px; cursor: pointer; transition: background 160ms ease, color 160ms ease, border-color 160ms ease; }
 .session-button:hover:not(:disabled) { background: #35423c; border-color: #35423c; }
 .session-button:disabled { opacity: 0.7; }
+.broadcast-controls { display: flex; margin-top: 10px; }
+.broadcast-controls .session-button { min-height: 42px; }
+.pairing-code-panel { display: flex; align-items: center; gap: 12px; margin-top: 10px; padding: 10px 12px; border: 1px solid var(--line); color: #68736c; font-family: var(--mono); font-size: 9px; }
+.pairing-code-panel code { flex: 1; overflow-wrap: anywhere; color: var(--ink); font-size: 10px; }
+.pairing-code-panel button { border: 0; padding: 4px; color: #547a59; background: transparent; font: inherit; cursor: pointer; }
 .session-stop { border-color: #d9deda; color: #39453f; background: transparent; }
 .session-stop:hover:not(:disabled) { border-color: #ecc3b5; color: #a44f35; background: #faeee9; }
 .button-key { margin-left: auto; padding: 3px 5px; border: 1px solid #d8dfd7; color: #7c867f; font-family: var(--mono); font-size: 8px; }

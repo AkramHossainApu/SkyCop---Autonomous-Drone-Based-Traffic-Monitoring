@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { useCameraBroadcast } from './useCameraBroadcast';
 import {
   ArrowUpRight,
   Camera,
@@ -29,6 +30,7 @@ export default function App() {
   const [cameraError, setCameraError] = useState('');
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [isStarting, setIsStarting] = useState(false);
+  const { status: broadcastStatus, error: broadcastError, pairingCode, start: startBroadcast, stop: stopBroadcast } = useCameraBroadcast(stream);
 
   useEffect(() => {
     if (videoRef.current) videoRef.current.srcObject = stream;
@@ -114,7 +116,7 @@ export default function App() {
               <h2>Live camera</h2>
             </div>
             <span className={`connection-pill ${stream ? 'connection-pill-live' : ''}`}>
-              <span className="pill-dot" /> {stream ? 'LOCAL PREVIEW' : 'NO SIGNAL'}
+              <span className="pill-dot" /> {broadcastStatus === 'connected' ? 'STREAMING TO APP' : stream ? 'LOCAL PREVIEW' : 'NO SIGNAL'}
             </span>
           </div>
 
@@ -131,7 +133,7 @@ export default function App() {
             <div className="frame-corner corner-bl" /><div className="frame-corner corner-br" />
             <div className="preview-topline">
               <span className="feed-label"><Video size={13} /> {stream ? 'DEVICE CAMERA' : 'CAMERA INPUT'}</span>
-              {stream && <span className="recording-label"><span /> PREVIEWING</span>}
+              {stream && <span className="recording-label"><span /> {broadcastStatus === 'connected' ? 'BROADCASTING' : 'PREVIEWING'}</span>}
             </div>
             <div className="preview-bottomline">
               <span><MapPin size={12} /> LOCAL DEVICE</span>
@@ -140,6 +142,28 @@ export default function App() {
           </div>
 
           {cameraError && <div className="camera-error" role="alert"><CircleHelp size={15} /> <span>{cameraError}</span><button aria-label="Dismiss error" onClick={() => setCameraError('')}><X size={15} /></button></div>}
+
+          {stream && (
+            <div className="broadcast-controls">
+              <button
+                className={`session-button ${broadcastStatus !== 'idle' ? 'session-stop' : ''}`}
+                onClick={broadcastStatus === 'idle' ? startBroadcast : stopBroadcast}
+                disabled={broadcastStatus === 'connecting'}
+              >
+                <Video size={16} />
+                {broadcastStatus === 'connected' ? 'Stop sharing with app' : broadcastStatus === 'waiting' ? 'Waiting for app…' : broadcastStatus === 'connecting' ? 'Connecting viewer…' : broadcastStatus === 'error' ? 'Reset viewer stream' : 'Connect Android viewer'}
+                {broadcastStatus === 'idle' && <ArrowUpRight size={15} />}
+              </button>
+            </div>
+          )}
+          {pairingCode && (
+            <div className="pairing-code-panel">
+              <span>ANDROID PAIRING CODE</span>
+              <code>{pairingCode}</code>
+              <button onClick={() => void navigator.clipboard.writeText(pairingCode)}>Copy code</button>
+            </div>
+          )}
+          {broadcastError && <div className="camera-error" role="alert"><CircleHelp size={15} /> <span>{broadcastError}</span><button aria-label="Dismiss broadcast error" onClick={() => stopBroadcast()}><X size={15} /></button></div>}
 
           <div className="camera-controls">
             <label className="camera-select-wrap" htmlFor="camera-facing">
@@ -162,7 +186,7 @@ export default function App() {
               </button>
             )}
           </div>
-          <div className="local-only-note"><ShieldCheck size={14} /> Camera stays on this device until the remote stream is connected.</div>
+          <div className="local-only-note"><ShieldCheck size={14} /> Camera stays local unless you connect an Android viewer.</div>
         </div>
       </section>
 
