@@ -113,9 +113,9 @@ export function useCameraBroadcast(stream: MediaStream | null) {
     try {
       const localHost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
       const signalingUrl = import.meta.env.VITE_SIGNALING_URL || (localHost ? `ws://${window.location.hostname}:8787` : '');
-      if (!signalingUrl) throw new Error('Set VITE_SIGNALING_URL to your public wss:// signaling server before deployment.');
+      if (!signalingUrl) throw new Error('Public signaling is not configured. Set VITE_SIGNALING_URL to your wss:// service in GitHub Actions and redeploy. The pairing code is shown but is not active yet.');
       if (window.location.protocol === 'https:' && signalingUrl.startsWith('ws://')) {
-        throw new Error('HTTPS websites require a secure wss:// signaling server.');
+        throw new Error('This website uses HTTPS. Set VITE_SIGNALING_URL to a secure wss:// signaling service.');
       }
 
       const socket = new WebSocket(signalingUrl);
@@ -133,7 +133,7 @@ export function useCameraBroadcast(stream: MediaStream | null) {
         }
       };
       socket.onerror = () => {
-        setError('Cannot reach the signaling server. Start it on port 8787 and check the network.');
+        setError('Cannot reach the signaling service. Check that the configured server is online and allows this website origin.');
         setStatus('error');
       };
       socket.onclose = () => {
@@ -142,10 +142,9 @@ export function useCameraBroadcast(stream: MediaStream | null) {
         closePeer();
         setStatus('idle');
       };
-    } catch {
-      setError('Could not open the signaling connection. Check VITE_SIGNALING_URL and use wss:// for GitHub Pages.');
+    } catch (error) {
+      setError(error instanceof Error ? error.message : 'Could not open the signaling connection.');
       setStatus('error');
-      setPairingCode('');
     }
   }
 
