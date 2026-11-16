@@ -6,6 +6,7 @@ import {
   CameraOff,
   ChevronDown,
   CircleHelp,
+  Copy,
   Crosshair,
   MapPin,
   RotateCcw,
@@ -32,9 +33,13 @@ export default function App() {
   const [isStarting, setIsStarting] = useState(false);
   const [signalingAddress, setSignalingAddress] = useState(() => {
     const local = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
-    return import.meta.env.VITE_SIGNALING_URL || (local ? `ws://${location.hostname}:8787` : '');
+    const fromLink = new URLSearchParams(location.search).get('signaling');
+    return fromLink || import.meta.env.VITE_SIGNALING_URL || (local ? `ws://${location.hostname}:8787` : '');
   });
   const { status: broadcastStatus, error: broadcastError, meetingCode, start: startBroadcast, stop: stopBroadcast } = useCameraBroadcast(stream, signalingAddress);
+  const invitation = meetingCode
+    ? `skycop://join?${new URLSearchParams({ server: signalingAddress.trim(), code: meetingCode })}`
+    : '';
 
   useEffect(() => {
     if (videoRef.current) videoRef.current.srcObject = stream;
@@ -168,7 +173,9 @@ export default function App() {
             <div className="pairing-code-panel">
               <span>MEETING CODE</span>
               <code>{meetingCode}</code>
-              <button onClick={() => void navigator.clipboard.writeText(meetingCode)}>Copy code</button>
+              <label htmlFor="meeting-invitation">INVITATION</label>
+              <input id="meeting-invitation" readOnly value={invitation} onFocus={(event) => event.currentTarget.select()} />
+              <button onClick={() => void navigator.clipboard.writeText(invitation)}><Copy size={13} /> Copy invitation</button>
             </div>
           )}
           {broadcastError && <div className="camera-error" role="alert"><CircleHelp size={15} /> <span>{broadcastError}</span><button aria-label="Dismiss broadcast error" onClick={() => stopBroadcast()}><X size={15} /></button></div>}

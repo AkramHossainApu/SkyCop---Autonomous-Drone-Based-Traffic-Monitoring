@@ -110,4 +110,11 @@ const cleanup = setInterval(() => {
 }, 60000);
 cleanup.unref();
 
+const heartbeat = setInterval(() => {
+  for (const socket of sockets.clients) {
+    if (socket.readyState === WebSocket.OPEN) socket.ping();
+  }
+}, 25000);
+heartbeat.unref();
+
 server.listen(port, '0.0.0.0', () => console.log(`SkyCop signaling host listening on port ${port}`));

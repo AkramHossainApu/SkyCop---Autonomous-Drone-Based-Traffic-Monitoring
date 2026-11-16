@@ -1,11 +1,27 @@
+import 'react-native-url-polyfill/auto';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useRef, useState } from 'react';
-import { Image, Platform, Pressable, SafeAreaView, ScrollView, StatusBar as NativeStatusBar, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Image, Linking, Platform, Pressable, SafeAreaView, ScrollView, StatusBar as NativeStatusBar, StyleSheet, Text, TextInput, View } from 'react-native';
 import type { MediaStream } from './webrtc';
 import RemoteVideo from './RemoteVideo';
 import { RTCPeerConnection, RTCSessionDescription } from './webrtc';
 
 type ConnectionStatus = 'disconnected' | 'connecting' | 'waiting' | 'connected' | 'error';
+
+function parseInvitation(value: string): { server: string; code: string } | null {
+  try {
+    const invitation = new URL(value.trim());
+    if (invitation.protocol !== 'skycop:' || invitation.hostname !== 'join') return null;
+    const server = invitation.searchParams.get('server');
+    const code = invitation.searchParams.get('code')?.toLowerCase();
+    if (!server || !code || !/^[a-hjkmnp-z2-9]{3}(-[a-hjkmnp-z2-9]{3}){2}$/.test(code)) return null;
+    const endpoint = new URL(server);
+    if (!['ws:', 'wss:'].includes(endpoint.protocol) || endpoint.username || endpoint.password) return null;
+    return { server: endpoint.toString(), code };
+  } catch {
+    return null;
+  }
+}
 
 function waitForIceGathering(peer: RTCPeerConnection): Promise<void> {
   if (peer.iceGatheringState === 'complete') return Promise.resolve();
@@ -36,6 +52,30 @@ export default function App() {
   const [connectionError, setConnectionError] = useState('');
   const peerRef = useRef<RTCPeerConnection | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
+  useEffect(() => {
+    let active = true;
+    function receiveInvitation(url: string) {
+      if (!active) return;
+      if (socketRef.current) {
+        setConnectionError('Disconnect from the current camera before opening another invitation.');
+        return;
+      }
+      const invitation = parseInvitation(url);
+      if (!invitation) {
+        setConnectionError('Invalid SkyCop invitation. Ask the website to copy a new one.');
+        return;
+      }
+      setMeetingCode(invitation.code);
+      setServerAddress(invitation.server);
+      setConnectionError('');
+      setConnectionStatus('disconnected');
+    }
+    const subscription = Linking.addEventListener('url', (event) => receiveInvitation(event.url));
+    void Linking.getInitialURL().then((url) => { if (url) receiveInvitation(url); }).catch(() => {
+      if (active) setConnectionError('Could not open the SkyCop invitation.');
+    });
+    return () => { active = false; subscription.remove(); };
+  }, []);
   useEffect(() => () => {
     socketRef.current?.close();
     socketRef.current = null;
@@ -103,17 +143,24 @@ export default function App() {
       if (!['ws:', 'wss:'].includes(url.protocol)) throw new Error('Enter a ws:// or wss:// signaling address.');
       const socket = new WebSocket(url.toString());
       socketRef.current = socket;
-      socket.onopen = () => socket.send(JSON.stringify({ type: 'join', code }));
+      let opened = false;
+      let serverError = '';
+      socket.onopen = () => {
+        opened = true;
+        socket.send(JSON.stringify({ type: 'join', code }));
+      };
       socket.onmessage = (event) => {
         try {
           const message = JSON.parse(String(event.data)) as { type: string; sdp?: string; message?: string };
           if (message.type === 'joined') setConnectionStatus('connecting');
           else if (message.type === 'offer' && message.sdp) void acceptOffer(socket, message.sdp);
           else if (message.type === 'error') {
-            setConnectionError(message.message ?? 'Could not join the meeting.');
+            serverError = message.message ?? 'Could not join the meeting.';
+            setConnectionError(serverError);
             setConnectionStatus('error');
           } else if (message.type === 'peer-left') {
-            setConnectionError('The website stopped sharing.');
+            serverError = 'The website stopped sharing.';
+            setConnectionError(serverError);
             setConnectionStatus('error');
           }
         } catch {
@@ -127,14 +174,18 @@ export default function App() {
           setConnectionStatus('error');
         }
       };
-      socket.onclose = () => {
+      socket.onclose = (event) => {
         if (socketRef.current !== socket) return;
         socketRef.current = null;
         peerRef.current?.close();
         peerRef.current = null;
         setRemoteVideoStream(null);
         setConnectionStatus('error');
-        setConnectionError('Signaling disconnected. Connect again.');
+        setConnectionError(serverError || (event.code === 1008
+          ? 'The host rejected the connection. Wait a minute or ask the host to check its settings.'
+          : opened
+            ? 'The host or tunnel stopped. Ask for a new invitation.'
+            : 'Cannot reach the host. Ask for a new invitation and check the connection.'));
       };
     } catch (caught) {
       setConnectionError(caught instanceof Error ? caught.message : 'Invalid signaling address.');
@@ -211,13 +262,26 @@ export default function App() {
           </View>
 
           <TextInput
-            accessibilityLabel="Meeting code"
+            accessibilityLabel="Meeting code or invitation"
             autoCapitalize="none"
             autoCorrect={false}
             value={meetingCode}
-            onChangeText={setMeetingCode}
+            onChangeText={(value) => {
+              if (!value.trim().startsWith('skycop://')) {
+                setMeetingCode(value);
+                return;
+              }
+              const invitation = parseInvitation(value);
+              if (!invitation) {
+                setConnectionError('Invalid SkyCop invitation. Ask the website to copy a new one.');
+                return;
+              }
+              setMeetingCode(invitation.code);
+              setServerAddress(invitation.server);
+              setConnectionError('');
+            }}
             editable={!socketRef.current}
-            placeholder="abc-def-234"
+            placeholder="Meeting code or SkyCop invitation"
             placeholderTextColor="#89938b"
             style={styles.serverInput}
           />

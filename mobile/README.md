@@ -7,10 +7,10 @@ This native React Native app receives the SkyCop website camera feed over WebRTC
 1. Connect the website device and Android device to the same network. They must be allowed to connect directly to each other.
 2. Start the signaling host on the Mac as described in the root README.
 3. On the website, start the camera and select **Connect Android viewer**.
-4. Enter the displayed meeting code in Android. Use `ws://10.0.2.2:8787` as the host for the emulator, or `ws://MAC_LAN_IP:8787` for a physical phone.
+4. Copy the invitation on the website and send it privately to Android. Open it with SkyCop or paste it into the meeting code field in the app.
 5. Tap **Join camera**. To stop sharing, disconnect in the app or stop the website camera.
 
-The meeting code grants access to the camera feed; share it privately. GitHub Pages requires a public `wss://` signaling address: use the temporary Mac tunnel described in the root README, and enter the same address in the website and Android app. No TURN relay is included, so guest networks, firewalls, and device/browser combinations can prevent direct connections even on the same Wi-Fi.
+The invitation grants access to the camera feed; share it privately. GitHub Pages requires a public `wss://` signaling address: use the temporary Mac tunnel described in the root README. No TURN relay is included, so guest networks, firewalls, and device/browser combinations can prevent direct connections even on the same Wi-Fi.
 
 ## Run from Android Studio
 

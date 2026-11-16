@@ -84,7 +84,12 @@ export function useCameraBroadcast(stream: MediaStream | null, signalingAddress:
       }
       const socket = new WebSocket(url.toString());
       socketRef.current = socket;
-      socket.onopen = () => socket.send(JSON.stringify({ type: 'create' }));
+      let opened = false;
+      let serverError = '';
+      socket.onopen = () => {
+        opened = true;
+        socket.send(JSON.stringify({ type: 'create' }));
+      };
       socket.onmessage = (event) => {
         void (async () => {
           const message = JSON.parse(String(event.data)) as SignalMessage;
@@ -100,7 +105,8 @@ export function useCameraBroadcast(stream: MediaStream | null, signalingAddress:
             closePeer();
             setStatus('waiting');
           } else if (message.type === 'error') {
-            setError(message.message ?? 'Signaling failed.');
+            serverError = message.message ?? 'Signaling failed.';
+            setError(serverError);
             setStatus('error');
           }
         })().catch(() => {
@@ -114,13 +120,17 @@ export function useCameraBroadcast(stream: MediaStream | null, signalingAddress:
           setStatus('error');
         }
       };
-      socket.onclose = () => {
+      socket.onclose = (event) => {
         if (socketRef.current !== socket) return;
         socketRef.current = null;
         closePeer();
         setMeetingCode('');
         setStatus('error');
-        setError('Signaling disconnected. Start a new session.');
+        setError(serverError || (event.code === 1008
+          ? 'The signaling host rejected this website origin. Check ALLOWED_ORIGINS on the Mac.'
+          : opened
+            ? 'The signaling host or tunnel stopped. Restart it and use its current address.'
+            : 'Could not reach the signaling host. Check that the Mac is running and use the latest tunnel address.'));
       };
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Could not open the signaling connection.');

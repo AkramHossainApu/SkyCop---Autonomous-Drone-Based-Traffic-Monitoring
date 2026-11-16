@@ -1,7 +1,13 @@
 #!/bin/zsh
 set -e
+setopt pipefail
 cd "${0:A:h}"
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+export PORT="${PORT:-8787}"
+if [[ ! "$PORT" =~ '^[0-9]+$' ]] || (( PORT < 1 || PORT > 65535 )); then
+  echo 'PORT must be a number between 1 and 65535.'
+  exit 1
+fi
 if ! command -v node >/dev/null || ! command -v npm >/dev/null; then
   echo 'Install Node.js and npm before starting the host.'
   exit 1
@@ -10,8 +16,8 @@ if ! command -v cloudflared >/dev/null; then
   echo 'Install cloudflared first: brew install cloudflared'
   exit 1
 fi
-if lsof -nP -iTCP:8787 -sTCP:LISTEN >/dev/null 2>&1; then
-  echo 'Port 8787 is already in use. Stop the existing host before starting another.'
+if lsof -nP "-iTCP:$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "Port $PORT is already in use. Stop the existing host before starting another."
   exit 1
 fi
 if [[ ! -d signaling-server/node_modules/ws ]]; then
@@ -19,10 +25,19 @@ if [[ ! -d signaling-server/node_modules/ws ]]; then
 fi
 export ALLOWED_ORIGINS="${ALLOWED_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,https://akramhossainapu.github.io}"
 echo 'Starting the SkyCop signaling host and a temporary public tunnel.'
-echo 'For testing only: share the tunnel address and meeting code privately.'
+echo 'For testing only: share invitations privately.'
 node signaling-server/index.mjs &
 SERVER_PID=$!
 trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8787
+opened=0
+cloudflared tunnel --no-autoupdate --url "http://127.0.0.1:$PORT" 2>&1 | while IFS= read -r line; do
+  print -r -- "$line"
+  if (( ! opened )) && [[ "$line" =~ 'https://[a-z0-9-]+\.trycloudflare\.com' ]]; then
+    opened=1
+    launch_url=$(node -e 'const url = new URL(process.argv[1]); url.searchParams.set("signaling", process.argv[2]); process.stdout.write(url.toString());' "${SKYCOP_SITE_URL:-https://akramhossainapu.github.io/SkyCop---Autonomous-Drone-Based-Traffic-Monitoring/}" "wss://${MATCH#https://}")
+    echo "Open this website link: $launch_url"
+    open "$launch_url" || echo 'Could not open the browser. Use the website link above.'
+  fi
+done

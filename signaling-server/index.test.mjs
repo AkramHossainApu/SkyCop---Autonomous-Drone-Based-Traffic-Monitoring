@@ -22,6 +22,7 @@ test('creates a code, pairs peers, and relays offer and answer', async (context)
   const viewer = new WebSocket(`ws://127.0.0.1:${port}`);
   context.after(() => { sender.terminate(); viewer.terminate(); });
   await Promise.all([once(sender, 'open'), once(viewer, 'open')]);
+  const heartbeat = once(sender, 'ping');
 
   const rejected = new WebSocket(`ws://127.0.0.1:${port}`, { origin: 'https://untrusted.test' });
   context.after(() => rejected.terminate());
@@ -48,6 +49,8 @@ test('creates a code, pairs peers, and relays offer and answer', async (context)
   const answer = once(sender, 'message');
   viewer.send(JSON.stringify({ type: 'answer', sdp: 'test-answer' }));
   assert.deepEqual(JSON.parse((await answer)[0].toString()), { type: 'answer', sdp: 'test-answer' });
+  await heartbeat;
+  assert.equal(sender.readyState, WebSocket.OPEN);
 });
 
 function processExec() {
