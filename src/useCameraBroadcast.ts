@@ -1,151 +1,37 @@
 import { useEffect, useRef, useState } from 'react';
 
-type SignalMessage = { type: string; role?: string; payload?: unknown; message?: string; iceServers?: RTCIceServer[] };
 export type BroadcastStatus = 'idle' | 'connecting' | 'waiting' | 'connected' | 'error';
+type SignalMessage = { type: string; code?: string; sdp?: string; message?: string };
 
-function createPairingCode() {
-  return Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, '0')).join('');
+function waitForIceGathering(peer: RTCPeerConnection): Promise<void> {
+  if (peer.iceGatheringState === 'complete') return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      peer.removeEventListener('icegatheringstatechange', onChange);
+      reject(new Error('Network candidate gathering timed out.'));
+    }, 15000);
+    function onChange() {
+      if (peer.iceGatheringState !== 'complete') return;
+      window.clearTimeout(timer);
+      peer.removeEventListener('icegatheringstatechange', onChange);
+      resolve();
+    }
+    peer.addEventListener('icegatheringstatechange', onChange);
+    onChange();
+  });
 }
 
-export function useCameraBroadcast(stream: MediaStream | null) {
-  const socketRef = useRef<WebSocket | null>(null);
+export function useCameraBroadcast(stream: MediaStream | null, signalingAddress: string) {
   const peerRef = useRef<RTCPeerConnection | null>(null);
-  const pendingCandidatesRef = useRef<RTCIceCandidateInit[]>([]);
-  const iceServersRef = useRef<RTCIceServer[]>([{ urls: 'stun:stun.l.google.com:19302' }]);
+  const socketRef = useRef<WebSocket | null>(null);
   const [status, setStatus] = useState<BroadcastStatus>('idle');
   const [error, setError] = useState('');
-  const [pairingCode, setPairingCode] = useState('');
+  const [meetingCode, setMeetingCode] = useState('');
 
   function closePeer() {
-    peerRef.current?.close();
+    const peer = peerRef.current;
     peerRef.current = null;
-    pendingCandidatesRef.current = [];
-  }
-
-  useEffect(() => () => {
-    socketRef.current?.close();
-    closePeer();
-  }, []);
-
-  async function createPeer() {
-    if (!stream) return;
-    closePeer();
-
-    const peer = new RTCPeerConnection({
-      iceServers: iceServersRef.current,
-    });
-    peerRef.current = peer;
-    stream.getTracks().forEach((track) => peer.addTrack(track, stream));
-    peer.onicecandidate = (event) => {
-      if (event.candidate && socketRef.current?.readyState === WebSocket.OPEN) {
-        socketRef.current.send(JSON.stringify({ type: 'candidate', payload: event.candidate.toJSON() }));
-      }
-    };
-    peer.onconnectionstatechange = () => {
-      if (peer.connectionState === 'connected') {
-        setStatus('connected');
-        setError('');
-      }
-      if (peer.connectionState === 'failed' || peer.connectionState === 'disconnected') {
-        setStatus('error');
-        setError('The viewer connection was interrupted. Check both devices are on the same network.');
-      }
-    };
-
-    const offer = await peer.createOffer();
-    await peer.setLocalDescription(offer);
-    if (socketRef.current?.readyState === WebSocket.OPEN) {
-      socketRef.current.send(JSON.stringify({
-        type: 'offer',
-        payload: { type: peer.localDescription?.type, sdp: peer.localDescription?.sdp },
-      }));
-    }
-  }
-
-  async function handleSignal(message: SignalMessage) {
-    if (message.type === 'joined') {
-      iceServersRef.current = message.iceServers ?? [{ urls: 'stun:stun.l.google.com:19302' }];
-      setStatus('waiting');
-      return;
-    }
-    if (message.type === 'peer-joined' && message.role === 'viewer') {
-      setStatus('connecting');
-      await createPeer();
-      return;
-    }
-    if (message.type === 'peer-left') {
-      closePeer();
-      setStatus(socketRef.current ? 'waiting' : 'idle');
-      return;
-    }
-    if (message.type === 'error') {
-      setError(message.message ?? 'The signaling server rejected the connection.');
-      setStatus('error');
-      return;
-    }
-    if (message.type === 'answer' && message.payload && peerRef.current) {
-      await peerRef.current.setRemoteDescription(new RTCSessionDescription(message.payload as RTCSessionDescriptionInit));
-      for (const candidate of pendingCandidatesRef.current) await peerRef.current.addIceCandidate(candidate);
-      pendingCandidatesRef.current = [];
-      return;
-    }
-    if (message.type === 'candidate' && message.payload) {
-      const candidate = message.payload as RTCIceCandidateInit;
-      if (peerRef.current?.remoteDescription) {
-        await peerRef.current.addIceCandidate(candidate);
-      } else {
-        pendingCandidatesRef.current.push(candidate);
-      }
-    }
-  }
-
-  function start() {
-    if (!stream) {
-      setError('Start the website camera preview before connecting the Android viewer.');
-      setStatus('error');
-      return;
-    }
-
-    setError('');
-    setStatus('connecting');
-    const code = createPairingCode();
-    setPairingCode(code);
-    try {
-      const localHost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
-      const signalingUrl = import.meta.env.VITE_SIGNALING_URL || (localHost ? `ws://${window.location.hostname}:8787` : '');
-      if (!signalingUrl) throw new Error('Public signaling is not configured. Set VITE_SIGNALING_URL to your wss:// service in GitHub Actions and redeploy. The pairing code is shown but is not active yet.');
-      if (window.location.protocol === 'https:' && signalingUrl.startsWith('ws://')) {
-        throw new Error('This website uses HTTPS. Set VITE_SIGNALING_URL to a secure wss:// signaling service.');
-      }
-
-      const socket = new WebSocket(signalingUrl);
-      socketRef.current = socket;
-      socket.onopen = () => socket.send(JSON.stringify({ type: 'join', room: code, role: 'sender' }));
-      socket.onmessage = (event) => {
-        try {
-          void handleSignal(JSON.parse(String(event.data)) as SignalMessage).catch(() => {
-            setError('Could not negotiate a video connection.');
-            setStatus('error');
-          });
-        } catch {
-          setError('Received an unreadable signaling message.');
-          setStatus('error');
-        }
-      };
-      socket.onerror = () => {
-        setError('Cannot reach the signaling service. Check that the configured server is online and allows this website origin.');
-        setStatus('error');
-      };
-      socket.onclose = () => {
-        if (socketRef.current !== socket) return;
-        socketRef.current = null;
-        closePeer();
-        setStatus('idle');
-      };
-    } catch (error) {
-      setError(error instanceof Error ? error.message : 'Could not open the signaling connection.');
-      setStatus('error');
-    }
+    peer?.close();
   }
 
   function stop() {
@@ -155,8 +41,92 @@ export function useCameraBroadcast(stream: MediaStream | null) {
     closePeer();
     setStatus('idle');
     setError('');
-    setPairingCode('');
+    setMeetingCode('');
   }
 
-  return { status, error, pairingCode, start, stop };
+  useEffect(() => () => {
+    socketRef.current?.close();
+    socketRef.current = null;
+    closePeer();
+  }, []);
+
+  async function createOffer(socket: WebSocket) {
+    if (!stream || socketRef.current !== socket) return;
+    closePeer();
+    const peer = new RTCPeerConnection({ iceServers: [] });
+    peerRef.current = peer;
+    stream.getTracks().forEach((track) => peer.addTrack(track, stream));
+    peer.onconnectionstatechange = () => {
+      if (peerRef.current !== peer) return;
+      if (peer.connectionState === 'connected') setStatus('connected');
+      if (peer.connectionState === 'failed' || peer.connectionState === 'disconnected') {
+        setStatus('error');
+        setError('Video connection lost. Check that the devices can reach each other.');
+      }
+    };
+    await peer.setLocalDescription(await peer.createOffer());
+    await waitForIceGathering(peer);
+    if (peerRef.current !== peer || socketRef.current !== socket || socket.readyState !== WebSocket.OPEN) return;
+    if (!peer.localDescription?.sdp) throw new Error('Could not create an offer.');
+    socket.send(JSON.stringify({ type: 'offer', sdp: peer.localDescription.sdp }));
+  }
+
+  function start() {
+    if (!stream || socketRef.current) return;
+    setError('');
+    setStatus('connecting');
+    try {
+      const signalingUrl = signalingAddress.trim();
+      if (!signalingUrl) throw new Error('Enter the secure signaling address for your Mac host.');
+      const url = new URL(signalingUrl);
+      if (!['ws:', 'wss:'].includes(url.protocol) || (location.protocol === 'https:' && url.protocol !== 'wss:')) {
+        throw new Error('GitHub Pages requires a secure wss:// signaling address.');
+      }
+      const socket = new WebSocket(url.toString());
+      socketRef.current = socket;
+      socket.onopen = () => socket.send(JSON.stringify({ type: 'create' }));
+      socket.onmessage = (event) => {
+        void (async () => {
+          const message = JSON.parse(String(event.data)) as SignalMessage;
+          if (message.type === 'created' && message.code) {
+            setMeetingCode(message.code);
+            setStatus('waiting');
+          } else if (message.type === 'viewer-joined') {
+            setStatus('connecting');
+            await createOffer(socket);
+          } else if (message.type === 'answer' && message.sdp && peerRef.current) {
+            await peerRef.current.setRemoteDescription({ type: 'answer', sdp: message.sdp });
+          } else if (message.type === 'peer-left') {
+            closePeer();
+            setStatus('waiting');
+          } else if (message.type === 'error') {
+            setError(message.message ?? 'Signaling failed.');
+            setStatus('error');
+          }
+        })().catch(() => {
+          setError('Could not negotiate a video connection.');
+          setStatus('error');
+        });
+      };
+      socket.onerror = () => {
+        if (socketRef.current === socket) {
+          setError('Cannot reach the signaling host. Check the address and server.');
+          setStatus('error');
+        }
+      };
+      socket.onclose = () => {
+        if (socketRef.current !== socket) return;
+        socketRef.current = null;
+        closePeer();
+        setMeetingCode('');
+        setStatus('error');
+        setError('Signaling disconnected. Start a new session.');
+      };
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Could not open the signaling connection.');
+      setStatus('error');
+    }
+  }
+
+  return { status, error, meetingCode, start, stop };
 }

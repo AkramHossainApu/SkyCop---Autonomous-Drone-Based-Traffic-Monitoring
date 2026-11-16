@@ -1,107 +1,113 @@
-import { createHmac } from 'node:crypto';
+import { randomInt } from 'node:crypto';
+import { createServer } from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
 
 const port = Number(process.env.PORT ?? 8787);
+const allowedOrigins = new Set((process.env.ALLOWED_ORIGINS ?? 'http://localhost:5173,http://127.0.0.1:5173').split(',').map((origin) => origin.trim()).filter(Boolean));
+const alphabet = 'abcdefghjkmnpqrstuvwxyz23456789';
 const rooms = new Map();
-const server = new WebSocketServer({ host: '0.0.0.0', port, maxPayload: 64 * 1024 });
-const peerRoles = new Set(['sender', 'viewer']);
-const signalTypes = new Set(['offer', 'answer', 'candidate']);
-const stunUrls = (process.env.STUN_URLS ?? 'stun:stun.l.google.com:19302').split(',').map((url) => url.trim()).filter(Boolean);
-const turnUrls = (process.env.TURN_URLS ?? '').split(',').map((url) => url.trim()).filter(Boolean);
-const turnSecret = process.env.TURN_SECRET;
-const turnTtlSeconds = Math.max(60, Number(process.env.TURN_TTL_SECONDS ?? 3600));
-const allowedOrigins = new Set((process.env.ALLOWED_ORIGINS ?? '').split(',').map((origin) => origin.trim()).filter(Boolean));
-
-function getIceServers(room) {
-  const iceServers = stunUrls.length ? [{ urls: stunUrls }] : [];
-  if (turnUrls.length && turnSecret) {
-    const username = `${Math.floor(Date.now() / 1000) + turnTtlSeconds}:${room}`;
-    const credential = createHmac('sha1', turnSecret).update(username).digest('base64');
-    iceServers.push({ urls: turnUrls, username, credential });
-  }
-  return iceServers;
-}
+const attempts = new Map();
+const server = createServer((_request, response) => {
+  response.writeHead(200, { 'Content-Type': 'text/plain' });
+  response.end('SkyCop signaling is running.');
+});
+const sockets = new WebSocketServer({ server, maxPayload: 65536 });
 
 function send(socket, message) {
   if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
 }
 
-function leaveRoom(socket) {
-  if (!socket.room || !socket.role) return;
-  const members = rooms.get(socket.room);
-  if (!members) return;
+function generateCode() {
+  let code = '';
+  for (let index = 0; index < 9; index++) code += alphabet[randomInt(alphabet.length)];
+  return `${code.slice(0, 3)}-${code.slice(3, 6)}-${code.slice(6)}`;
+}
 
-  const isCurrentMember = members.get(socket.role) === socket;
-  if (isCurrentMember) {
-    members.delete(socket.role);
-    const otherRole = socket.role === 'sender' ? 'viewer' : 'sender';
-    send(members.get(otherRole), { type: 'peer-left' });
+function leave(socket) {
+  const room = rooms.get(socket.code);
+  if (!room) return;
+  if (room.sender === socket) {
+    rooms.delete(socket.code);
+    send(room.viewer, { type: 'peer-left' });
+    room.viewer?.close(1000, 'Sender disconnected');
+  } else if (room.viewer === socket) {
+    room.viewer = null;
+    send(room.sender, { type: 'peer-left' });
   }
-  if (members.size === 0) rooms.delete(socket.room);
-  socket.room = undefined;
+  socket.code = undefined;
   socket.role = undefined;
 }
 
-server.on('connection', (socket, request) => {
+sockets.on('connection', (socket, request) => {
   const origin = request.headers.origin;
-  if (origin && allowedOrigins.size > 0 && !allowedOrigins.has(origin)) {
-    socket.close(1008, 'Origin is not allowed.');
+  const nativeOrigin = !origin || origin === 'null' || origin === `http://${request.headers.host}` || origin === `https://${request.headers.host}`;
+  if (!nativeOrigin && !allowedOrigins.has(origin)) {
+    socket.close(1008, 'Origin not allowed');
     return;
   }
-
   socket.on('message', (raw) => {
     let message;
-    try {
-      message = JSON.parse(raw.toString());
-    } catch {
-      send(socket, { type: 'error', message: 'Invalid message.' });
+    try { message = JSON.parse(raw.toString()); } catch { socket.close(1003, 'Invalid message'); return; }
+    if (!message || typeof message !== 'object') { socket.close(1003, 'Invalid message'); return; }
+
+    if (message.type === 'create' && !socket.code) {
+      if (rooms.size >= 100) { send(socket, { type: 'error', message: 'Host is busy. Try again later.' }); return; }
+      let code;
+      do { code = generateCode(); } while (rooms.has(code));
+      socket.code = code;
+      socket.role = 'sender';
+      rooms.set(code, { sender: socket, viewer: null, created: Date.now() });
+      send(socket, { type: 'created', code });
       return;
     }
 
-    if (message.type === 'join') {
-      if (typeof message.room !== 'string' || !/^[a-f0-9]{32}$/.test(message.room) || !peerRoles.has(message.role)) {
-        send(socket, { type: 'error', message: 'A valid 128-bit pairing code and peer role are required.' });
+    if (message.type === 'join' && !socket.code) {
+      const address = request.socket.remoteAddress ?? 'unknown';
+      const now = Date.now();
+      const recent = (attempts.get(address) ?? []).filter((time) => now - time < 60000);
+      if (recent.length >= 20) { socket.close(1008, 'Too many attempts'); return; }
+      recent.push(now);
+      attempts.set(address, recent);
+      const code = typeof message.code === 'string' ? message.code.trim().toLowerCase() : '';
+      const room = rooms.get(code);
+      if (!room || now - room.created > 3600000 || room.viewer) {
+        send(socket, { type: 'error', message: 'Code not found or already in use.' });
         return;
       }
-
-      leaveRoom(socket);
-      const members = rooms.get(message.room) ?? new Map();
-      const otherRole = message.role === 'sender' ? 'viewer' : 'sender';
-      const otherPeer = members.get(otherRole);
-      const previousPeer = members.get(message.role);
-
-      if (previousPeer && previousPeer !== socket) {
-        send(previousPeer, { type: 'peer-left' });
-        previousPeer.close(1000, 'Replaced by a newer peer');
-      }
-
-      socket.room = message.room;
-      socket.role = message.role;
-      members.set(message.role, socket);
-      rooms.set(message.room, members);
-      send(socket, { type: 'joined', role: message.role, iceServers: getIceServers(message.room) });
-
-      if (otherPeer && otherPeer.readyState === WebSocket.OPEN) {
-        send(otherPeer, { type: 'peer-joined', role: message.role });
-        send(socket, { type: 'peer-joined', role: otherRole });
-      }
+      socket.code = code;
+      socket.role = 'viewer';
+      room.viewer = socket;
+      send(socket, { type: 'joined' });
+      send(room.sender, { type: 'viewer-joined' });
       return;
     }
 
-    if (signalTypes.has(message.type) && socket.room && socket.role) {
-      const members = rooms.get(socket.room);
-      const recipientRole = socket.role === 'sender' ? 'viewer' : 'sender';
-      send(members?.get(recipientRole), { type: message.type, payload: message.payload });
+    const room = rooms.get(socket.code);
+    if (room && typeof message.sdp === 'string' && message.sdp.length <= 60000 &&
+        ((socket.role === 'sender' && message.type === 'offer') || (socket.role === 'viewer' && message.type === 'answer'))) {
+      send(socket.role === 'sender' ? room.viewer : room.sender, { type: message.type, sdp: message.sdp });
       return;
     }
-
-    send(socket, { type: 'error', message: 'Join a room before sending a signal.' });
+    send(socket, { type: 'error', message: 'Invalid signaling message.' });
   });
-
-  socket.on('close', () => leaveRoom(socket));
-  socket.on('error', () => leaveRoom(socket));
+  socket.on('close', () => leave(socket));
+  socket.on('error', () => leave(socket));
 });
 
-console.log(`SkyCop development signaling server listening on ws://0.0.0.0:${port}`);
-if (turnUrls.length && !turnSecret) console.warn('TURN_URLS is set without TURN_SECRET; clients will only receive STUN servers.');
-console.log('For public hosting, terminate TLS at the hosting proxy and use an authenticated, rate-limited service.');
+const cleanup = setInterval(() => {
+  const now = Date.now();
+  for (const [address, times] of attempts) {
+    if (times.every((time) => now - time >= 60000)) attempts.delete(address);
+  }
+  for (const [code, room] of rooms) {
+    if (now - room.created > 3600000) {
+      send(room.sender, { type: 'error', message: 'Session expired. Start a new session.' });
+      room.sender.close(1000, 'Session expired');
+      room.viewer?.close(1000, 'Session expired');
+      rooms.delete(code);
+    }
+  }
+}, 60000);
+cleanup.unref();
+
+server.listen(port, '0.0.0.0', () => console.log(`SkyCop signaling host listening on port ${port}`));

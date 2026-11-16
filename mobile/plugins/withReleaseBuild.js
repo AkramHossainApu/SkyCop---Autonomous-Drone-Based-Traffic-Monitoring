@@ -1,12 +1,11 @@
 const { withAndroidManifest, withGradleProperties } = require('@expo/config-plugins');
 
-module.exports = function withLocalWebSocket(config) {
-  config = withAndroidManifest(config, (config) => {
-    const application = config.modResults.manifest.application?.[0];
+module.exports = function withReleaseBuild(config) {
+  config = withAndroidManifest(config, (manifestConfig) => {
+    const application = manifestConfig.modResults.manifest.application?.[0];
     if (application) application.$['android:usesCleartextTraffic'] = 'true';
-    return config;
+    return manifestConfig;
   });
-
   return withGradleProperties(config, (config) => {
     const minifyProperty = config.modResults.find(
       (property) => property.type === 'property' && property.key === 'android.enableMinifyInReleaseBuilds',

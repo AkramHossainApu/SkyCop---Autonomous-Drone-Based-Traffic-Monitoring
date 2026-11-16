@@ -1,167 +1,145 @@
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useRef, useState } from 'react';
-import { Image, Pressable, SafeAreaView, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Image, Platform, Pressable, SafeAreaView, ScrollView, StatusBar as NativeStatusBar, StyleSheet, Text, TextInput, View } from 'react-native';
 import type { MediaStream } from './webrtc';
 import RemoteVideo from './RemoteVideo';
-import { RTCIceCandidate, RTCPeerConnection, RTCSessionDescription } from './webrtc';
-
-type SignalMessage = {
-  type: string;
-  role?: string;
-  payload?: any;
-  message?: string;
-  iceServers?: IceServer[];
-};
+import { RTCPeerConnection, RTCSessionDescription } from './webrtc';
 
 type ConnectionStatus = 'disconnected' | 'connecting' | 'waiting' | 'connected' | 'error';
-type IceServer = { urls: string | string[]; username?: string; credential?: string };
+
+function waitForIceGathering(peer: RTCPeerConnection): Promise<void> {
+  if (peer.iceGatheringState === 'complete') return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      peer.onicegatheringstatechange = null;
+      reject(new Error('Network candidate gathering timed out. Try again.'));
+    }, 15000);
+    peer.onicegatheringstatechange = () => {
+      if (peer.iceGatheringState !== 'complete') return;
+      clearTimeout(timer);
+      peer.onicegatheringstatechange = null;
+      resolve();
+    };
+    if (peer.iceGatheringState === 'complete') {
+      clearTimeout(timer);
+      peer.onicegatheringstatechange = null;
+      resolve();
+    }
+  });
+}
 
 export default function App() {
-  const [serverAddress, setServerAddress] = useState(process.env.EXPO_PUBLIC_SIGNALING_URL ?? 'ws://10.0.2.2:8787');
-  const [pairingCode, setPairingCode] = useState('');
+  const [meetingCode, setMeetingCode] = useState('');
+  const [serverAddress, setServerAddress] = useState(process.env.EXPO_PUBLIC_SIGNALING_URL || 'ws://10.0.2.2:8787');
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
   const [remoteVideoStream, setRemoteVideoStream] = useState<unknown>(null);
   const [connectionError, setConnectionError] = useState('');
-  const [isSocketOpen, setIsSocketOpen] = useState(false);
-  const socketRef = useRef<WebSocket | null>(null);
   const peerRef = useRef<RTCPeerConnection | null>(null);
-  const pendingCandidatesRef = useRef<any[]>([]);
-  const iceServersRef = useRef<IceServer[]>([{ urls: 'stun:stun.l.google.com:19302' }]);
-
+  const socketRef = useRef<WebSocket | null>(null);
   useEffect(() => () => {
-    const socket = socketRef.current;
+    socketRef.current?.close();
     socketRef.current = null;
-    socket?.close();
     peerRef.current?.close();
     peerRef.current = null;
   }, []);
 
-  function sendSignal(type: string, payload?: unknown) {
+  function disconnect() {
     const socket = socketRef.current;
-    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type, payload }));
-  }
-
-  function closePeer() {
-    peerRef.current?.close();
+    socketRef.current = null;
+    socket?.close();
+    const peer = peerRef.current;
     peerRef.current = null;
-    pendingCandidatesRef.current = [];
+    peer?.close();
     setRemoteVideoStream(null);
+    setConnectionError('');
+    setConnectionStatus('disconnected');
   }
 
-  async function handleSignal(message: SignalMessage) {
-    if (message.type === 'joined') {
-      if (message.iceServers?.length) iceServersRef.current = message.iceServers;
-      setConnectionStatus('waiting');
-      return;
-    }
-    if (message.type === 'peer-joined' && message.role === 'sender') {
-      setConnectionStatus('waiting');
-      return;
-    }
-    if (message.type === 'peer-left') {
-      closePeer();
-      setConnectionStatus(socketRef.current ? 'waiting' : 'disconnected');
-      return;
-    }
-    if (message.type === 'error') {
-      setConnectionError(message.message ?? 'The signaling server rejected the connection.');
-      setConnectionStatus('error');
-      return;
-    }
-    if (message.type === 'offer' && message.payload) {
-      closePeer();
-      const peer = new RTCPeerConnection({
-        iceServers: iceServersRef.current,
-      });
-      peerRef.current = peer;
+  async function acceptOffer(socket: WebSocket, sdp: string) {
+    if (socketRef.current !== socket) return;
+    peerRef.current?.close();
+    const peer = new RTCPeerConnection({ iceServers: [] });
+    peerRef.current = peer;
+    try {
       peer.ontrack = (event) => {
         const [stream] = (event as unknown as { streams: MediaStream[] }).streams;
-        if (stream) {
-          setRemoteVideoStream(stream);
-          setConnectionStatus('connected');
-        }
-      };
-      peer.onicecandidate = (event) => {
-        const candidate = (event as unknown as { candidate: RTCIceCandidate | null }).candidate;
-        if (candidate) sendSignal('candidate', candidate.toJSON());
+        if (stream && peerRef.current === peer) setRemoteVideoStream(stream);
       };
       peer.onconnectionstatechange = () => {
+        if (peerRef.current !== peer) return;
         if (peer.connectionState === 'connected') setConnectionStatus('connected');
         if (peer.connectionState === 'failed' || peer.connectionState === 'disconnected') {
           setConnectionStatus('error');
-          setConnectionError('The video connection was interrupted. Check the signaling and TURN server configuration.');
+          setConnectionError('Connection lost. Start a new session and check your network.');
         }
       };
-
-      await peer.setRemoteDescription(new RTCSessionDescription(message.payload));
-      for (const candidate of pendingCandidatesRef.current) {
-        await peer.addIceCandidate(new RTCIceCandidate(candidate));
-      }
-      pendingCandidatesRef.current = [];
-      const answer = await peer.createAnswer();
-      await peer.setLocalDescription(answer);
-      sendSignal('answer', { type: peer.localDescription?.type, sdp: peer.localDescription?.sdp });
-      return;
-    }
-    if (message.type === 'candidate' && message.payload) {
-      const peer = peerRef.current;
-      if (peer?.remoteDescription) {
-        await peer.addIceCandidate(new RTCIceCandidate(message.payload));
-      } else {
-        pendingCandidatesRef.current.push(message.payload);
-      }
+      await peer.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }));
+      await peer.setLocalDescription(await peer.createAnswer());
+      await waitForIceGathering(peer);
+      if (peerRef.current !== peer || socketRef.current !== socket || socket.readyState !== WebSocket.OPEN) return;
+      if (!peer.localDescription?.sdp) throw new Error('Could not create an answer.');
+      socket.send(JSON.stringify({ type: 'answer', sdp: peer.localDescription.sdp }));
+    } catch {
+      if (peerRef.current !== peer) return;
+      peerRef.current = null;
+      peer.close();
+      setConnectionError('Could not negotiate a video connection. Start a new session.');
+      setConnectionStatus('error');
     }
   }
 
   function connectToWebsite() {
-    setConnectionError('');
-    const room = pairingCode.trim().toLowerCase();
-    if (!/^[a-f0-9]{32}$/.test(room)) {
-      setConnectionError('Enter the 32-character pairing code shown by the website camera station.');
+    if (socketRef.current) return;
+    const code = meetingCode.trim().toLowerCase();
+    if (!/^[a-hjkmnp-z2-9]{3}(-[a-hjkmnp-z2-9]{3}){2}$/.test(code)) {
+      setConnectionError('Enter the meeting code shown on the website.');
       setConnectionStatus('error');
       return;
     }
+    setConnectionError('');
     setConnectionStatus('connecting');
     try {
-      const socket = new WebSocket(serverAddress.trim());
+      const url = new URL(serverAddress.trim());
+      if (!['ws:', 'wss:'].includes(url.protocol)) throw new Error('Enter a ws:// or wss:// signaling address.');
+      const socket = new WebSocket(url.toString());
       socketRef.current = socket;
-      socket.onopen = () => {
-        setIsSocketOpen(true);
-        socket.send(JSON.stringify({ type: 'join', room, role: 'viewer' }));
-      };
+      socket.onopen = () => socket.send(JSON.stringify({ type: 'join', code }));
       socket.onmessage = (event) => {
         try {
-          void handleSignal(JSON.parse(String(event.data)) as SignalMessage);
+          const message = JSON.parse(String(event.data)) as { type: string; sdp?: string; message?: string };
+          if (message.type === 'joined') setConnectionStatus('connecting');
+          else if (message.type === 'offer' && message.sdp) void acceptOffer(socket, message.sdp);
+          else if (message.type === 'error') {
+            setConnectionError(message.message ?? 'Could not join the meeting.');
+            setConnectionStatus('error');
+          } else if (message.type === 'peer-left') {
+            setConnectionError('The website stopped sharing.');
+            setConnectionStatus('error');
+          }
         } catch {
-          setConnectionError('Received an unreadable signaling message.');
+          setConnectionError('Invalid response from the signaling host.');
           setConnectionStatus('error');
         }
       };
       socket.onerror = () => {
-        setConnectionError('Cannot reach the signaling server. Check its address and that it is running.');
-        setConnectionStatus('error');
+        if (socketRef.current === socket) {
+          setConnectionError('Cannot reach the signaling host. Check the address and server.');
+          setConnectionStatus('error');
+        }
       };
       socket.onclose = () => {
         if (socketRef.current !== socket) return;
         socketRef.current = null;
-        setIsSocketOpen(false);
-        closePeer();
-        setConnectionStatus('disconnected');
+        peerRef.current?.close();
+        peerRef.current = null;
+        setRemoteVideoStream(null);
+        setConnectionStatus('error');
+        setConnectionError('Signaling disconnected. Connect again.');
       };
-    } catch {
-      setConnectionError('Enter a valid ws:// development or wss:// hosted signaling address.');
+    } catch (caught) {
+      setConnectionError(caught instanceof Error ? caught.message : 'Invalid signaling address.');
       setConnectionStatus('error');
     }
-  }
-
-  function disconnect() {
-    const socket = socketRef.current;
-    socketRef.current = null;
-    setIsSocketOpen(false);
-    closePeer();
-    socket?.close();
-    setConnectionError('');
-    setConnectionStatus('disconnected');
   }
 
   const isConnected = connectionStatus === 'connected';
@@ -217,8 +195,8 @@ export default function App() {
                     <View style={styles.crosshairHorizontal} />
                     <View style={styles.crosshairVertical} />
                   </View>
-                  <Text style={styles.emptyTitle}>{connectionStatus === 'waiting' ? 'Waiting for website camera' : 'Connect to website camera'}</Text>
-                  <Text style={styles.emptyCaption}>{connectionStatus === 'waiting' ? 'Start broadcasting from the website camera station.' : 'Join the local viewing room to receive the live feed.'}</Text>
+                  <Text style={styles.emptyTitle}>Connect to website camera</Text>
+                  <Text style={styles.emptyCaption}>Enter the meeting code from the website.</Text>
                 </>
               )}
             </View>
@@ -233,35 +211,35 @@ export default function App() {
           </View>
 
           <TextInput
-            accessibilityLabel="Website pairing code"
+            accessibilityLabel="Meeting code"
             autoCapitalize="none"
             autoCorrect={false}
-            value={pairingCode}
-            onChangeText={setPairingCode}
-            editable={!isSocketOpen}
-            placeholder="32-character code from website"
+            value={meetingCode}
+            onChangeText={setMeetingCode}
+            editable={!socketRef.current}
+            placeholder="abc-def-234"
             placeholderTextColor="#89938b"
             style={styles.serverInput}
           />
           <TextInput
-            accessibilityLabel="Signaling server address"
+            accessibilityLabel="Signaling host address"
             autoCapitalize="none"
             autoCorrect={false}
             keyboardType="url"
             value={serverAddress}
             onChangeText={setServerAddress}
-            editable={!isSocketOpen}
+            editable={!socketRef.current}
             placeholder="wss://signal.example.com"
             placeholderTextColor="#89938b"
             style={styles.serverInput}
           />
           <Pressable
             accessibilityRole="button"
-            onPress={isSocketOpen ? disconnect : connectToWebsite}
-            style={({ pressed }) => [styles.connectButton, isSocketOpen && styles.disconnectButton, pressed && styles.buttonPressed]}
+            onPress={socketRef.current ? disconnect : connectToWebsite}
+            style={({ pressed }) => [styles.connectButton, socketRef.current && styles.disconnectButton, pressed && styles.buttonPressed]}
           >
-            <Text style={[styles.connectButtonText, isSocketOpen && styles.disconnectButtonText]}>
-              {isSocketOpen ? 'Disconnect from website' : 'Connect to website camera'}
+            <Text style={[styles.connectButtonText, socketRef.current && styles.disconnectButtonText]}>
+              {socketRef.current ? 'Disconnect' : 'Join camera'}
             </Text>
           </Pressable>
           {connectionError ? <Text style={styles.connectionError}>{connectionError}</Text> : null}
@@ -292,7 +270,7 @@ const styles = StyleSheet.create({
     maxWidth: 760,
     alignSelf: 'center',
     paddingHorizontal: 24,
-    paddingTop: 12,
+    paddingTop: Platform.OS === 'android' ? (NativeStatusBar.currentHeight ?? 24) + 12 : 12,
     paddingBottom: 20,
   },
   topbar: {
@@ -429,13 +407,14 @@ const styles = StyleSheet.create({
     backgroundColor: '#e3e8e1',
   },
   serverInput: {
-    minHeight: 42,
+    height: 48,
     marginTop: 12,
     paddingHorizontal: 11,
     borderWidth: 1,
     borderColor: '#d8dfd7',
     color: '#202a27',
     fontSize: 12,
+    textAlignVertical: 'center',
   },
   connectButton: {
     minHeight: 44,

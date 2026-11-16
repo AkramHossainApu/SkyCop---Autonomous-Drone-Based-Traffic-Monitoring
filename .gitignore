@@ -2,3 +2,7 @@ node_modules/
 dist/
 .DS_Store
 *.tsbuildinfo
+signaling-server/deploy/.env
+signaling-server/mac/coturn.log
+signaling-server/mac/coturn-public.log
+signaling-server/mac/caddy-public.log

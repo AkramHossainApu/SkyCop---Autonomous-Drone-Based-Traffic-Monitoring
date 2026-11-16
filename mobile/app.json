@@ -10,14 +10,13 @@
     "platforms": ["ios", "android"],
     "plugins": [
       "@config-plugins/react-native-webrtc",
-      "./plugins/withLocalWebSocket"
+      "./plugins/withReleaseBuild"
     ],
     "ios": {
       "supportsTablet": true
     },
     "android": {
       "package": "com.skycop.trafficmonitoring",
-      "usesCleartextTraffic": true,
       "blockedPermissions": [
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO"

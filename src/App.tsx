@@ -30,7 +30,11 @@ export default function App() {
   const [cameraError, setCameraError] = useState('');
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [isStarting, setIsStarting] = useState(false);
-  const { status: broadcastStatus, error: broadcastError, pairingCode, start: startBroadcast, stop: stopBroadcast } = useCameraBroadcast(stream);
+  const [signalingAddress, setSignalingAddress] = useState(() => {
+    const local = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+    return import.meta.env.VITE_SIGNALING_URL || (local ? `ws://${location.hostname}:8787` : '');
+  });
+  const { status: broadcastStatus, error: broadcastError, meetingCode, start: startBroadcast, stop: stopBroadcast } = useCameraBroadcast(stream, signalingAddress);
 
   useEffect(() => {
     if (videoRef.current) videoRef.current.srcObject = stream;
@@ -82,6 +86,7 @@ export default function App() {
   }
 
   function stopSession() {
+    stopBroadcast();
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
     setStream(null);
@@ -145,10 +150,13 @@ export default function App() {
 
           {stream && (
             <div className="broadcast-controls">
+              <label className="signaling-address">
+                <span>Signaling address</span>
+                <input type="url" value={signalingAddress} onChange={(event) => setSignalingAddress(event.target.value)} disabled={broadcastStatus !== 'idle' && broadcastStatus !== 'error'} placeholder="wss://your-host.trycloudflare.com" autoCapitalize="none" autoCorrect="off" />
+              </label>
               <button
                 className={`session-button ${broadcastStatus !== 'idle' ? 'session-stop' : ''}`}
-                onClick={broadcastStatus === 'idle' ? startBroadcast : stopBroadcast}
-                disabled={broadcastStatus === 'connecting'}
+                onClick={broadcastStatus === 'idle' ? () => void startBroadcast() : stopBroadcast}
               >
                 <Video size={16} />
                 {broadcastStatus === 'connected' ? 'Stop sharing with app' : broadcastStatus === 'waiting' ? 'Waiting for app…' : broadcastStatus === 'connecting' ? 'Connecting viewer…' : broadcastStatus === 'error' ? 'Reset viewer stream' : 'Connect Android viewer'}
@@ -156,11 +164,11 @@ export default function App() {
               </button>
             </div>
           )}
-          {pairingCode && (
+          {meetingCode && (
             <div className="pairing-code-panel">
-              <span>ANDROID PAIRING CODE</span>
-              <code>{pairingCode}</code>
-              <button onClick={() => void navigator.clipboard.writeText(pairingCode)}>Copy code</button>
+              <span>MEETING CODE</span>
+              <code>{meetingCode}</code>
+              <button onClick={() => void navigator.clipboard.writeText(meetingCode)}>Copy code</button>
             </div>
           )}
           {broadcastError && <div className="camera-error" role="alert"><CircleHelp size={15} /> <span>{broadcastError}</span><button aria-label="Dismiss broadcast error" onClick={() => stopBroadcast()}><X size={15} /></button></div>}

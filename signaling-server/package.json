@@ -1,9 +1,11 @@
 {
-  "name": "skycop-signaling-server",
+  "name": "skycop-signaling",
   "private": true,
+  "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "start": "node index.mjs"
+    "start": "node index.mjs",
+    "test": "node --test"
   },
   "dependencies": {
     "ws": "^8.18.3"
