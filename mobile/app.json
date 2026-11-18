@@ -4,13 +4,23 @@
     "slug": "skycop-traffic-monitoring",
     "version": "0.1.0",
     "scheme": "skycop",
-    "orientation": "portrait",
+    "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "platforms": ["ios", "android"],
+    "platforms": [
+      "ios",
+      "android"
+    ],
     "plugins": [
+      [
+        "expo-screen-orientation",
+        {
+          "initialOrientation": "PORTRAIT_UP"
+        }
+      ],
       "@config-plugins/react-native-webrtc",
-      "./plugins/withReleaseBuild"
+      "./plugins/withReleaseBuild",
+      "expo-asset"
     ],
     "ios": {
       "supportsTablet": true

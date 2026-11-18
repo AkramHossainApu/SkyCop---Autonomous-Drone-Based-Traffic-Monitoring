@@ -2,6 +2,10 @@
 
 This native React Native app receives the SkyCop website camera feed over WebRTC. It does not open or request the phone's camera. The release APK runs standalone and does not need Expo Go or Metro after installation.
 
+## Native flight simulation
+
+Tap **OPEN 3D VR SIMULATION** from the app's home screen to enter its immersive landscape city simulation. A standard Bluetooth controller uses the left stick for throttle and yaw, the right stick for independent camera look, and the left/right triggers for altitude. The 3D view is split into matched left/right headset views. Tap the screen to reveal the temporary HUD, then tap **EXIT** to return to the portrait receiver. The city streams sectors ahead, and buildings, traffic, and signal poles have collision bounds. Cars queue at timed traffic lights and behind nearby traffic. When a live feed is connected, gamepad **X** switches directly between simulation and live headset video without showing the HUD during the transition.
+
 ## Pair with the website
 
 1. Connect the website device and Android device to the same network. They must be allowed to connect directly to each other.
@@ -11,6 +15,8 @@ This native React Native app receives the SkyCop website camera feed over WebRTC
 5. Tap **Join camera**. To stop sharing, disconnect in the app or stop the website camera.
 
 The invitation grants access to the camera feed; share it privately. GitHub Pages requires a public `wss://` signaling address: use the temporary Mac tunnel described in the root README. No TURN relay is included, so guest networks, firewalls, and device/browser combinations can prevent direct connections even on the same Wi-Fi.
+
+When video is live, tap **VR FULL SCREEN** on the preview to rotate to landscape and display the same feed side-by-side for a headset. Tap **EXIT VR** to restore portrait. The viewer remains camera-free.
 
 ## Run from Android Studio
 

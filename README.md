@@ -2,6 +2,10 @@
 
 SkyCop previews a website device's camera and provides a native Android viewer for a direct, same-network WebRTC connection.
 
+## Android flight simulation
+
+The detailed city simulation runs in the Android app, not the website. Tap **OPEN 3D VR SIMULATION** in the app to enter landscape stereo mode. A connected standard Bluetooth controller uses the left stick for drone yaw/throttle, the right stick for independent camera look, and the triggers for altitude. The simulation streams nearby city sectors, includes traffic lights and collision bounds, and queues cars at signals. Tap the screen to reveal the temporary HUD; tap **EXIT** to return to the receiver. When a live feed is connected, gamepad **X** switches between simulation and headset video without showing the transition HUD.
+
 ## Run locally
 
 Install Node.js 20.19+ or 22.12+, then from this folder:

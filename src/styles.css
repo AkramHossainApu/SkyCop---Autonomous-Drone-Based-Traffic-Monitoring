@@ -40,9 +40,9 @@ button:disabled, select:disabled { cursor: not-allowed; }
 .intro-copy-wrap { max-width: 900px; }
 .eyebrow { display: flex; align-items: center; gap: 9px; color: #727d75; font-size: 9px; }
 .eyebrow-marker { width: 7px; height: 7px; background: var(--accent); transform: rotate(45deg); }
-h1 { margin: 19px 0 12px; font-family: var(--display); font-size: clamp(36px, 4.5vw, 61px); line-height: 0.99; font-weight: 500; letter-spacing: 0; }
-
-.intro-copy { color: #727b74; font-size: 16px; margin: 0; font-weight: 500; }
+h1 { margin: 12px 0 0; font-family: var(--display); font-size: 36px; line-height: 1; font-weight: 500; letter-spacing: 0; }
+.intro-copy { color: #727b74; font-family: var(--mono); font-size: 9px; margin: 8px 0 0; font-weight: 500; }
+.intro-divider { padding: 0 7px; color: #b0b8b0; }
 
 .workspace { border-top: 1px solid var(--line); padding-top: 25px; }
 .camera-column { max-width: 100%; }
@@ -120,8 +120,8 @@ h1 { margin: 19px 0 12px; font-family: var(--display); font-size: clamp(36px, 4.
   .topbar { height: 62px; }
   .topbar-center { display: none; }
   .system-status { font-size: 8px; }
-  .intro { padding: 37px 0 26px; }
-  h1 { font-size: clamp(35px, 10vw, 48px); }
+  .intro { padding: 28px 0 18px; }
+  h1 { font-size: 31px; }
   .workspace { padding-top: 20px; }
   .preview-frame { min-height: 0; }
   .empty-caption { max-width: 210px; text-align: center; line-height: 1.4; }

@@ -1,8 +1,12 @@
 import 'react-native-url-polyfill/auto';
 import { StatusBar } from 'expo-status-bar';
+import * as ScreenOrientation from 'expo-screen-orientation';
+import { setVisibilityAsync } from 'expo-navigation-bar';
+import { useGamepad } from 'react-native-earl-gamepad';
 import { useEffect, useRef, useState } from 'react';
 import { Image, Linking, Platform, Pressable, SafeAreaView, ScrollView, StatusBar as NativeStatusBar, StyleSheet, Text, TextInput, View } from 'react-native';
 import type { MediaStream } from './webrtc';
+import FlightSimulation, { type FlightControls } from './FlightSimulation';
 import RemoteVideo from './RemoteVideo';
 import { RTCPeerConnection, RTCSessionDescription } from './webrtc';
 
@@ -50,8 +54,51 @@ export default function App() {
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
   const [remoteVideoStream, setRemoteVideoStream] = useState<unknown>(null);
   const [connectionError, setConnectionError] = useState('');
+  const [isVrMode, setIsVrMode] = useState(false);
+  const [screen, setScreen] = useState<'receiver' | 'simulation'>('receiver');
+  const [vrHudVisible, setVrHudVisible] = useState(true);
+  const [vrHudPulse, setVrHudPulse] = useState(0);
+  const [simulationStartHidden, setSimulationStartHidden] = useState(false);
   const peerRef = useRef<RTCPeerConnection | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
+  const previousXRef = useRef(false);
+  const gamepad = useGamepad({ axisThreshold: 0.12 });
+  const flightControls: FlightControls = {
+    yaw: gamepad.axes.leftX ?? 0,
+    throttle: gamepad.axes.leftY ?? 0,
+    lookX: gamepad.axes.rightX ?? 0,
+    lookY: gamepad.axes.rightY ?? 0,
+    climb: (gamepad.buttonValues.rt ?? 0) - (gamepad.buttonValues.lt ?? 0),
+  };
+  useEffect(() => {
+    void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => undefined);
+    return () => {
+      void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => undefined);
+      void setVisibilityAsync('visible').catch(() => undefined);
+    };
+  }, []);
+  useEffect(() => {
+    const pressed = gamepad.isPressed('x');
+    if (pressed && !previousXRef.current) {
+      if (screen === 'simulation') {
+        if (connectionStatus === 'connected' && remoteVideoStream) {
+          setScreen('receiver');
+          setIsVrMode(true);
+          setVrHudVisible(false);
+          void setVisibilityAsync('hidden').catch(() => undefined);
+        }
+      } else if (remoteVideoStream && connectionStatus === 'connected') {
+        setSimulationStartHidden(true);
+        void enterSimulation(true);
+      }
+    }
+    previousXRef.current = pressed;
+  }, [gamepad.pressedButtons, screen, connectionStatus, remoteVideoStream]);
+  useEffect(() => {
+    if (!isVrMode || !vrHudVisible) return undefined;
+    const timeout = setTimeout(() => setVrHudVisible(false), 3500);
+    return () => clearTimeout(timeout);
+  }, [isVrMode, vrHudVisible, vrHudPulse]);
   useEffect(() => {
     let active = true;
     function receiveInvitation(url: string) {
@@ -93,6 +140,48 @@ export default function App() {
     setRemoteVideoStream(null);
     setConnectionError('');
     setConnectionStatus('disconnected');
+  }
+
+  async function enterVrMode(quiet = false) {
+    if (!remoteVideoStream) return;
+    try {
+      await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE);
+      setIsVrMode(true);
+      setVrHudVisible(!quiet);
+      void setVisibilityAsync('hidden').catch(() => undefined);
+    } catch {
+      setConnectionError('Could not rotate the viewer. Check that the device allows screen rotation.');
+    }
+  }
+
+  async function exitVrMode() {
+    setIsVrMode(false);
+    void setVisibilityAsync('visible').catch(() => undefined);
+    try {
+      await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
+    } catch {
+      setConnectionError('Could not restore portrait orientation. Rotate the device manually.');
+    }
+  }
+
+  async function enterSimulation(quiet = false) {
+    setIsVrMode(false);
+    setSimulationStartHidden(quiet);
+    setScreen('simulation');
+    void setVisibilityAsync('hidden').catch(() => undefined);
+    try {
+      await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE);
+    } catch {
+      setScreen('receiver');
+      void setVisibilityAsync('visible').catch(() => undefined);
+      setConnectionError('Could not rotate to landscape. Check that the device allows screen rotation.');
+    }
+  }
+
+  async function exitSimulation() {
+    setScreen('receiver');
+    await setVisibilityAsync('visible').catch(() => undefined);
+    await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => undefined);
   }
 
   async function acceptOffer(socket: WebSocket, sdp: string) {
@@ -197,10 +286,38 @@ export default function App() {
   const statusLabel = isConnected ? 'LIVE' : connectionStatus === 'connecting' ? 'CONNECTING' : connectionStatus === 'error' ? 'CONNECTION ERROR' : connectionStatus === 'waiting' ? 'WAITING FOR SENDER' : 'SYSTEM READY';
   const feedLabel = isConnected ? 'LIVE' : connectionStatus === 'waiting' ? 'WAITING' : 'NO SIGNAL';
 
+  if (screen === 'simulation') return (
+    <View style={styles.appRoot}>
+      <View pointerEvents="none" style={styles.gamepadLayer}>{gamepad.bridge}</View>
+      <FlightSimulation onExit={() => void exitSimulation()} controls={flightControls} startHidden={simulationStartHidden} />
+    </View>
+  );
+
+  if (isVrMode && remoteVideoStream) {
+    return (
+      <View style={styles.appRoot}>
+        <View pointerEvents="none" style={styles.gamepadLayer}>{gamepad.bridge}</View>
+        <View style={styles.vrRoot} onTouchStart={() => { setVrHudVisible(true); setVrHudPulse((pulse) => pulse + 1); }}>
+          <StatusBar hidden />
+          <View style={styles.vrEyes}>
+            <View style={styles.vrEye}><RemoteVideo stream={remoteVideoStream} /></View>
+            <View style={styles.vrEye}><RemoteVideo stream={remoteVideoStream} /></View>
+            <View pointerEvents="none" style={styles.vrDivider} />
+          </View>
+          {vrHudVisible && <Pressable accessibilityRole="button" accessibilityLabel="Exit VR full-screen view" onPress={() => void exitVrMode()} style={styles.vrExitButton}>
+            <Text style={styles.vrExitText}>EXIT VR</Text>
+          </Pressable>}
+        </View>
+      </View>
+    );
+  }
+
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <StatusBar style="dark" />
-      <ScrollView contentContainerStyle={styles.content}>
+    <View style={styles.appRoot}>
+      <View pointerEvents="none" style={styles.gamepadLayer}>{gamepad.bridge}</View>
+      <SafeAreaView style={styles.safeArea}>
+        <StatusBar style="dark" />
+        <ScrollView contentContainerStyle={styles.content}>
         <View style={styles.topbar}>
           <View style={styles.brand}>
             <Image source={require('./assets/skycop-logo.png')} style={styles.brandLogo} resizeMode="contain" />
@@ -219,6 +336,9 @@ export default function App() {
           </View>
           <Text style={styles.title}>Autonomous Drone-Based Traffic Monitoring<Text style={styles.titlePeriod}>.</Text></Text>
           <Text style={styles.subtitle}>VR Police Control</Text>
+          <Pressable accessibilityRole="button" onPress={() => void enterSimulation()} style={({ pressed }) => [styles.simulationButton, pressed && styles.buttonPressed]}>
+            <Text style={styles.simulationButtonText}>OPEN 3D VR SIMULATION</Text>
+          </Pressable>
         </View>
 
         <View style={styles.workspace}>
@@ -235,6 +355,16 @@ export default function App() {
 
           <View style={styles.previewFrame}>
             {remoteVideoStream ? <RemoteVideo stream={remoteVideoStream} /> : <View style={styles.previewGrid} />}
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Enter VR full-screen view"
+              disabled={!remoteVideoStream}
+              onPress={() => void enterVrMode()}
+              style={({ pressed }) => [styles.vrButton, !remoteVideoStream && styles.vrButtonDisabled, pressed && styles.buttonPressed]}
+            >
+              <Text style={styles.vrButtonIcon}>□</Text>
+              <Text style={styles.vrButtonText}>VR FULL SCREEN</Text>
+            </Pressable>
             <View style={styles.previewTopline}>
               <Text style={styles.feedLabel}>REMOTE CAMERA FEED</Text>
               <Text style={styles.feedLabel}>{feedLabel}</Text>
@@ -318,15 +448,76 @@ export default function App() {
           <Text style={styles.footerLabel}>SKYCOP / LIVE CAMERA</Text>
           <Text style={styles.footerVersion}>BUILD 0.1.0</Text>
         </View>
-      </ScrollView>
-    </SafeAreaView>
+        </ScrollView>
+      </SafeAreaView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
+  appRoot: {
+    flex: 1,
+    width: '100%',
+    height: '100%',
+    position: 'relative',
+  },
+  gamepadLayer: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    width: 1,
+    height: 1,
+    opacity: 0,
+    zIndex: -1,
+  },
   safeArea: {
     flex: 1,
+    width: '100%',
+    height: '100%',
     backgroundColor: '#f2f4ef',
+  },
+  vrRoot: {
+    flex: 1,
+    backgroundColor: '#000000',
+  },
+  vrEyes: {
+    flex: 1,
+    flexDirection: 'row',
+    backgroundColor: '#000000',
+  },
+  vrEye: {
+    flex: 1,
+    position: 'relative',
+    overflow: 'hidden',
+    backgroundColor: '#000000',
+  },
+  vrDivider: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    left: '50%',
+    width: 2,
+    marginLeft: -1,
+    backgroundColor: '#000000',
+  },
+  vrExitButton: {
+    position: 'absolute',
+    top: 12,
+    right: 12,
+    minWidth: 68,
+    minHeight: 34,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+    borderWidth: 1,
+    borderColor: '#ffffff50',
+    backgroundColor: '#111111a8',
+  },
+  vrExitText: {
+    color: '#ffffff',
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 0.6,
   },
   content: {
     flexGrow: 1,
@@ -386,6 +577,22 @@ const styles = StyleSheet.create({
   intro: {
     paddingTop: 30,
     paddingBottom: 24,
+  },
+  simulationButton: {
+    alignSelf: 'flex-start',
+    minHeight: 40,
+    justifyContent: 'center',
+    marginTop: 16,
+    paddingHorizontal: 13,
+    borderWidth: 1,
+    borderColor: '#202a27',
+    backgroundColor: '#202a27',
+  },
+  simulationButtonText: {
+    color: '#f5f5ef',
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 0.5,
   },
   eyebrow: {
     flexDirection: 'row',
@@ -469,6 +676,34 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: '#d8dfd7',
     backgroundColor: '#e3e8e1',
+  },
+  vrButton: {
+    position: 'absolute',
+    zIndex: 5,
+    top: 38,
+    right: 12,
+    minHeight: 31,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 9,
+    borderWidth: 1,
+    borderColor: '#ffffff88',
+    backgroundColor: '#202a27c9',
+  },
+  vrButtonDisabled: {
+    opacity: 0.48,
+  },
+  vrButtonIcon: {
+    color: '#f5f5ef',
+    fontSize: 16,
+    lineHeight: 18,
+  },
+  vrButtonText: {
+    color: '#f5f5ef',
+    fontSize: 8,
+    fontWeight: '700',
+    letterSpacing: 0.55,
   },
   serverInput: {
     height: 48,
