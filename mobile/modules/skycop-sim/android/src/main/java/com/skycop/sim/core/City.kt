@@ -24,6 +24,9 @@ class City(val map: MapData) {
         const val DOCK_TOP = 7.2f
         const val DOCK_RADIUS = 1.7f
         const val ROAD_Y = 0.06f
+        /** The low wall around a flat roof. */
+        const val PARAPET = 1.0f
+        private const val GRID = 2000
         const val ASPHALT = 0xC9C9C6
         private const val WIRE = 0x23262A
     }
@@ -32,6 +35,10 @@ class City(val map: MapData) {
     class Chunk(val x: Float, val z: Float) {
         val mesh = MeshBuilder()
         val detail = MeshBuilder()
+        /** Soft darkening decals (contact shadows, grime, worn lanes) multiplied over what is drawn. */
+        val shade = MeshBuilder()
+        /** Pools of lamp light, added over the streets at night: gray 0 is the brightest. */
+        val glow = MeshBuilder()
         var top = 6f
         /** How far this chunk's meshes reach from its center, for culling. */
         var reach = CELL / 2
@@ -70,6 +77,28 @@ class City(val map: MapData) {
     val junctionRadius = FloatArray(map.nodeCount)
 
     private val random = Random(2026)
+    /** Spots along the footpaths where a street tree may go, once the buildings are known. */
+    private var treeSpots = FloatArray(256)
+    private var treeSpotCount = 0
+    /** Footpath center lines for the walkers: x0, z0, x1, z1 for each stretch. */
+    var walkways = FloatArray(0)
+        private set
+    var walkwayCount = 0
+        private set
+    /** Each stretch as found: x0, z0, x1, z1, outward x, outward z, distance to the footpath's outer edge. */
+    private var rawWalks = FloatArray(7 * 256)
+    private var rawWalkCount = 0
+    private val adColors = intArrayOf(
+        0xF6C324, 0xD11F2A, 0x1A1A1A, 0x1E5AA8, 0xF2F2F2, 0xF6C324, 0xE2342D, 0xF2F2F2, 0x1A1A1A,
+        0x1F8A4C, 0xF6C324, 0xF2F2F2, 0x6B2C91, 0xF2F2F2, 0xF29A2E, 0xF2F2F2, 0xE2342D, 0x1E5AA8,
+    )
+    private val bannerColors = intArrayOf(0xC8202A, 0x1D7A3E, 0xF0B323, 0xF4F4F0, 0x1F4E9A, 0xE8641C)
+    private val fruitColors = intArrayOf(0xE8902A, 0xC8302A, 0xE8C838, 0x7CB342)
+
+    /** One meter cells covered by a road, path, canal or junction, so street trees stay off them. */
+    private var paved: BooleanArray? = BooleanArray(GRID * GRID)
+    /** Just the carriageways, so a footpath is never laid on or beside another road. */
+    private var roads: BooleanArray? = BooleanArray(GRID * GRID)
     private val point = FloatArray(4)
     private val apartmentTints = intArrayOf(0xF4F1EA, 0xEFE4CF, 0xE9D9BE, 0xDCDCD6, 0xF3E3B5, 0xF0CDB4, 0xCFDDE6, 0xD9E6D1, 0xE8C9C0, 0xC7C2B8)
     private val houseTints = intArrayOf(0xEFE7D6, 0xE6C9A0, 0xD8E4D8, 0xF2DCC4, 0xD7CFC4, 0xF4E9C9)
@@ -85,7 +114,11 @@ class City(val map: MapData) {
         for (i in 0 until map.areaCount) buildArea(i)
         for (i in 0 until map.ribbonCount) buildRibbon(i)
         buildRoads()
+        roads = null
         for (i in 0 until map.buildingCount) buildBuilding(i)
+        finishWalkways()
+        placeStalls()
+        plantStreetTrees()
         for (i in 0 until map.landmarkCount) buildLandmark(i)
         for (d in 0 until dockCount) buildDock(map.dockX[d], map.dockZ[d])
         buildTerrain()
@@ -257,6 +290,7 @@ class City(val map: MapData) {
         val leaves = Mat.of(Tex.LEAVES)
         m.ellipsoid(x, 3.4f * s, z, 2.1f * s, 1.5f * s, 2f * s, 6, 4, color, leaves, 0.25f)
         m.ellipsoid(x + 0.4f * s, 4.5f * s, z - 0.3f * s, 1.3f * s, 1.1f * s, 1.3f * s, 5, 3, color, leaves, 0.3f)
+        m.ellipsoid(x - 0.9f * s, 3.9f * s, z + 0.7f * s, 1.15f * s, 0.95f * s, 1.1f * s, 5, 3, color, leaves, 0.35f)
         solid(x, z, 0f, 1.5f * s, 1.5f * s, 2.1f * s, 5.4f * s, false)
         solid(x, z, 0f, 0.22f, 0.22f, 0f, 2.1f * s, false)
     }
@@ -265,6 +299,10 @@ class City(val map: MapData) {
         val from = map.ribbonStart[i]; val to = map.ribbonStart[i + 1]
         if (to - from < 2) return
         val w = map.ribbonWidth[i]
+        for (k in from until to - 1) pave(map.ribbonX[k], map.ribbonZ[k], map.ribbonX[k + 1], map.ribbonZ[k + 1], w / 2 + 1.2f)
+        if (map.ribbonKind[i] == MapData.MINOR_ROAD) {
+            for (k in from until to - 1) pave(map.ribbonX[k], map.ribbonZ[k], map.ribbonX[k + 1], map.ribbonZ[k + 1], w / 2 + 0.2f, roads)
+        }
         val c = meshChunk(map.ribbonX[from], map.ribbonZ[from], w)
         for (k in from until to) c.reach = max(c.reach, max(abs(map.ribbonX[k] - c.x), abs(map.ribbonZ[k] - c.z)) + w)
         when (map.ribbonKind[i]) {
@@ -289,6 +327,14 @@ class City(val map: MapData) {
             widest[a] = max(widest[a], h); widest[b] = max(widest[b], h)
         }
         for (n in 0 until map.nodeCount) junctionRadius[n] = if (degree[n] >= 3) widest[n] + 1.2f else 0f
+        // Every carriageway first: a divided road is two one-way roads side by side in the map,
+        // and the strip between them is a median, not a footpath.
+        for (e in 0 until map.edgeCount) {
+            for (k in map.edgeStart[e] until map.edgeStart[e + 1] - 1) {
+                pave(map.edgeX[k], map.edgeZ[k], map.edgeX[k + 1], map.edgeZ[k + 1], map.edgeWidth[e] / 2 + 0.2f, roads)
+            }
+        }
+        for (n in 0 until map.nodeCount) if (degree[n] >= 2) pave(map.nodeX[n], map.nodeZ[n], map.nodeX[n], map.nodeZ[n], widest[n] + 0.2f, roads)
 
         for (e in 0 until map.edgeCount) {
             val from = map.edgeStart[e]; val to = map.edgeStart[e + 1]
@@ -298,13 +344,17 @@ class City(val map: MapData) {
             for (k in from until to) c.reach = max(c.reach, max(abs(map.edgeX[k] - c.x), abs(map.edgeZ[k] - c.z)) + width)
             var elevated = false
             for (k in from until to) if (map.edgeY[k] > 0.5f) elevated = true
+            val footpath = if (map.edgeClass[e] <= 4 && !elevated) (if (map.edgeClass[e] <= 3) 2.6f else 1.9f) else 0.3f
+            for (k in from until to - 1) pave(map.edgeX[k], map.edgeZ[k], map.edgeX[k + 1], map.edgeZ[k + 1], width / 2 + footpath)
             strip(c.mesh, map.edgeX, map.edgeZ, map.edgeY, from, to, width, ROAD_Y, ASPHALT, Mat.of(Tex.ASPHALT))
+            roadGrime(e, c)
             if (elevated) bridge(e, c)
             markings(e, c)
             if (map.edgeClass[e] <= 4 && !elevated) sidewalks(e, c)
             if (map.edgeClass[e] >= 3 && !elevated) wires(e)
         }
         for (n in 0 until map.nodeCount) {
+            if (degree[n] >= 2) pave(map.nodeX[n], map.nodeZ[n], map.nodeX[n], map.nodeZ[n], widest[n] + 2.6f)
             if (degree[n] >= 2) {
                 disc(meshChunk(map.nodeX[n], map.nodeZ[n], widest[n]).mesh, map.nodeX[n], map.nodeY[n] + ROAD_Y, map.nodeZ[n], widest[n], 12, ASPHALT, Mat.of(Tex.ASPHALT))
             }
@@ -389,6 +439,80 @@ class City(val map: MapData) {
         if (cls <= 2 && backward > 0 && end - start > 20f && map.edgeY[map.edgeStart[e]] < 0.5f) median(e, c, start, end)
     }
 
+    /** A soft darkening band along edge [e], from lateral offset [o0] (gray [k0]) to [o1] (gray [k1]). */
+    private fun shadeBand(e: Int, m: MeshBuilder, o0: Float, o1: Float, k0: Float, k1: Float, lift: Float) {
+        val from = map.edgeStart[e]; val to = map.edgeStart[e + 1]
+        for (k in from until to - 1) {
+            val ax = map.edgeX[k]; val az = map.edgeZ[k]; val bx = map.edgeX[k + 1]; val bz = map.edgeZ[k + 1]
+            val l = hypot(bx - ax, bz - az)
+            if (l < 0.01f) continue
+            val px = -(bz - az) / l; val pz = (bx - ax) / l
+            val ya = map.edgeY[k] + lift; val yb = map.edgeY[k + 1] + lift
+            m.shadeQuad(ax + px * o0, ya, az + pz * o0, bx + px * o0, yb, bz + pz * o0,
+                bx + px * o1, yb, bz + pz * o1, ax + px * o1, ya, az + pz * o1, k0, k0, k1, k1)
+        }
+    }
+
+    /** Grime in the gutters along both edges and the oil-darkened middle of every lane. */
+    private fun roadGrime(e: Int, c: Chunk) {
+        val half = map.edgeWidth[e] / 2
+        val lift = ROAD_Y + 0.008f
+        shadeBand(e, c.shade, -half, -half + 0.9f, 0.68f, 1f, lift)
+        shadeBand(e, c.shade, half, half - 0.9f, 0.68f, 1f, lift)
+        if (map.edgeClass[e] > 5) return
+        val lanes = max(1, map.lanesForward[e] + map.lanesBackward[e])
+        val laneWidth = map.edgeWidth[e] / lanes
+        for (i in 0 until lanes) {
+            val middle = -half + (i + 0.5f) * laneWidth
+            shadeBand(e, c.shade, middle - 0.75f, middle, 1f, 0.82f, lift)
+            shadeBand(e, c.shade, middle, middle + 0.75f, 0.82f, 1f, lift)
+        }
+    }
+
+    /** Marks the grid cells whose centers lie within [half] of the segment from a to b. */
+    private fun pave(ax: Float, az: Float, bx: Float, bz: Float, half: Float, into: BooleanArray? = paved) {
+        val grid = into ?: return
+        val i0 = floor(min(ax, bx) - half + HALF).toInt().coerceIn(0, GRID - 1)
+        val i1 = floor(max(ax, bx) + half + HALF).toInt().coerceIn(0, GRID - 1)
+        val j0 = floor(min(az, bz) - half + HALF).toInt().coerceIn(0, GRID - 1)
+        val j1 = floor(max(az, bz) + half + HALF).toInt().coerceIn(0, GRID - 1)
+        val dx = bx - ax; val dz = bz - az
+        val length2 = dx * dx + dz * dz
+        for (j in j0..j1) for (i in i0..i1) {
+            val px = -HALF + i + 0.5f; val pz = -HALF + j + 0.5f
+            val t = (if (length2 > 0f) ((px - ax) * dx + (pz - az) * dz) / length2 else 0f).coerceIn(0f, 1f)
+            val ex = ax + dx * t - px; val ez = az + dz * t - pz
+            if (ex * ex + ez * ez <= half * half) grid[j * GRID + i] = true
+        }
+    }
+
+    private fun isPaved(x: Float, z: Float, grid: BooleanArray? = paved): Boolean {
+        if (grid == null) return false
+        val i = floor(x + HALF).toInt(); val j = floor(z + HALF).toInt()
+        if (i < 0 || j < 0 || i >= GRID || j >= GRID) return true
+        return grid[j * GRID + i]
+    }
+
+    /** Street trees along the footpaths, wherever no road, building, pole or dock is in the way. */
+    private fun plantStreetTrees() {
+        for (k in 0 until treeSpotCount) {
+            val x = treeSpots[k * 2]; val z = treeSpots[k * 2 + 1]
+            if (isPaved(x, z) || isPaved(x - 0.7f, z - 0.7f) || isPaved(x + 0.7f, z - 0.7f) ||
+                isPaved(x - 0.7f, z + 0.7f) || isPaved(x + 0.7f, z + 0.7f)) continue
+            if (support(x, z, 1000f, 2.2f) > 0f) continue
+            var nearDock = false
+            for (d in 0 until dockCount) if (abs(docks[d * 3] - x) < 6f && abs(docks[d * 3 + 2] - z) < 6f) nearDock = true
+            if (!nearDock) tree(x, z, 0.75f + 0.45f * spotHash(x, z, 3))
+        }
+        paved = null
+    }
+
+    private fun spotHash(x: Float, z: Float, seed: Int): Float {
+        var h = (x * 10f).roundToInt() * 374761393 + (z * 10f).roundToInt() * 668265263 + seed * 1442695041
+        h = (h xor (h ushr 13)) * 1274126177
+        return ((h xor (h ushr 16)) and 0xffff) / 65536f
+    }
+
     /** A raised, planted median on the main roads, stopping short of the junctions. */
     private fun median(e: Int, c: Chunk, start: Float, end: Float) {
         var s = start + 4f
@@ -400,12 +524,21 @@ class City(val map: MapData) {
             if (l > 0.5f) {
                 val px = -dz / l * 0.45f; val pz = dx / l * 0.45f
                 val mx = (ax + bx) / 2; val mz = (az + bz) / 2
-                val h = 0.4f
-                wall(c.mesh, ax + px, az + pz, bx + px, bz + pz, 0f, h, mx, mz, 0xD8D4CA, Mat.of(Tex.CONCRETE))
-                wall(c.mesh, bx - px, bz - pz, ax - px, az - pz, 0f, h, mx, mz, 0xD8D4CA, Mat.of(Tex.CONCRETE))
-                wall(c.mesh, ax - px, az - pz, ax + px, az + pz, 0f, h, mx, mz, 0xD8D4CA, Mat.of(Tex.CONCRETE))
-                wall(c.mesh, bx + px, bz + pz, bx - px, bz - pz, 0f, h, mx, mz, 0xD8D4CA, Mat.of(Tex.CONCRETE))
-                upQuad(c.mesh, ax + px, az + pz, bx + px, bz + pz, bx - px, bz - pz, ax - px, az - pz, h, 0x8DA65E, Mat.of(Tex.GRASS))
+                // Dhaka's medians: kerbs painted yellow and black around a strip of soil and shrubs.
+                val h = 0.35f
+                val kerb = Mat.STRIPED; val yellow = 0xE8B52A
+                wall(c.mesh, ax + px, az + pz, bx + px, bz + pz, 0f, h, mx, mz, yellow, kerb)
+                wall(c.mesh, bx - px, bz - pz, ax - px, az - pz, 0f, h, mx, mz, yellow, kerb)
+                wall(c.mesh, ax - px, az - pz, ax + px, az + pz, 0f, h, mx, mz, yellow, kerb)
+                wall(c.mesh, bx + px, bz + pz, bx - px, bz - pz, 0f, h, mx, mz, yellow, kerb)
+                upQuad(c.mesh, ax + px, az + pz, bx + px, bz + pz, bx - px, bz - pz, ax - px, az - pz, h, 0x8C7A5C, Mat.of(Tex.GRASS))
+                var t = 1.5f
+                while (t < l - 1f) {
+                    val sx = ax + dx / l * t; val sz = az + dz / l * t
+                    val leaf = leafColors[((t * 3f).toInt() + e) % leafColors.size]
+                    c.detail.ellipsoid(sx, h + 0.3f, sz, 0.42f, 0.38f, 0.42f, 5, 3, leaf, Mat.of(Tex.LEAVES), 0.25f)
+                    t += 3.5f
+                }
                 solid(mx, mz, atan2(dz, dx), l / 2, 0.45f, 0f, h)
             }
             s = s2 + 1f
@@ -417,20 +550,265 @@ class City(val map: MapData) {
         val start = junctionRadius[map.edgeA[e]] + 0.5f; val end = length - junctionRadius[map.edgeB[e]] - 0.5f
         if (end - start < 3f) return
         val h = map.edgeWidth[e] / 2
+        val main = map.edgeClass[e] <= 3
+        val walk = if (main) 2.6f else 1.9f
+        // Kerb stones: black and yellow on the main roads, black and white elsewhere.
+        val kerbColor = if (main) 0xE8B52A else 0xE6E6E0
+        val kerb = 0.24f
         for (side in intArrayOf(-1, 1)) {
             var s = start
             while (s < end) {
-                val s2 = min(end, s + 10f)
+                val s2 = min(end, s + 8f)
+                edgePoint(e, (s + s2) / 2, point)
+                val median = isPaved(point[0] + point[3] * side * (h + walk * 0.5f), point[1] - point[2] * side * (h + walk * 0.5f), roads) ||
+                    isPaved(point[0] + point[3] * side * (h + walk + 1f), point[1] - point[2] * side * (h + walk + 1f), roads)
                 edgePoint(e, s, point)
                 val ix = point[0] + point[3] * side * h; val iz = point[1] - point[2] * side * h
-                val ox = point[0] + point[3] * side * (h + 1.8f); val oz = point[1] - point[2] * side * (h + 1.8f)
+                val kx = point[0] + point[3] * side * (h + kerb); val kz = point[1] - point[2] * side * (h + kerb)
+                val ox = point[0] + point[3] * side * (h + walk); val oz = point[1] - point[2] * side * (h + walk)
                 edgePoint(e, s2, point)
                 val jx = point[0] + point[3] * side * h; val jz = point[1] - point[2] * side * h
-                val px = point[0] + point[3] * side * (h + 1.8f); val pz = point[1] - point[2] * side * (h + 1.8f)
-                upQuad(c.mesh, ix, iz, jx, jz, px, pz, ox, oz, CURB, 0xDCD7CC, Mat.of(Tex.PAVING))
-                wall(c.mesh, ix, iz, jx, jz, 0f, CURB, ox, oz, 0xC9C4B8, Mat.of(Tex.CONCRETE))
+                val lx = point[0] + point[3] * side * (h + kerb); val lz = point[1] - point[2] * side * (h + kerb)
+                val px = point[0] + point[3] * side * (h + walk); val pz = point[1] - point[2] * side * (h + walk)
+                val top = CURB + 0.03f
+                upQuad(c.mesh, ix, iz, jx, jz, lx, lz, kx, kz, top, kerbColor, Mat.STRIPED)
+                wall(c.mesh, ix, iz, jx, jz, 0f, top, ox, oz, kerbColor, Mat.STRIPED)
+                if (median) {
+                    // Another carriageway lies just beyond: only the kerb, the rest is the median.
+                    wall(c.mesh, kx, kz, lx, lz, 0f, top, ix, iz, kerbColor, Mat.STRIPED)
+                    s = s2
+                    continue
+                }
+                upQuad(c.mesh, kx, kz, lx, lz, px, pz, ox, oz, CURB, 0xDCD7CC, Mat.of(Tex.PAVING))
+                // The kerb stands a little proud of the paving; its back edge and the footpath's outer edge.
+                wall(c.detail, kx, kz, lx, lz, CURB, top, ix, iz, 0xC9C4B8, Mat.of(Tex.CONCRETE))
+                wall(c.mesh, ox, oz, px, pz, 0f, CURB, ix, iz, 0xBDB7AA, Mat.of(Tex.CONCRETE))
+                // Grime where the footpath meets the ground beyond it.
+                val gx = (ox - ix) / walk * 0.9f; val gz = (oz - iz) / walk * 0.9f
+                c.shade.shadeQuad(ox, 0.05f, oz, px, 0.05f, pz, px + gx, 0.05f, pz + gz, ox + gx, 0.05f, oz + gz, 0.62f, 0.62f, 1f, 1f)
+                // The middle of the footpath, where people walk.
+                val middle = h + kerb + (walk - kerb) / 2
+                edgePoint(e, s, point)
+                val wx0 = point[0] + point[3] * side * middle; val wz0 = point[1] - point[2] * side * middle
+                val outX = point[3] * side; val outZ = -point[2] * side
+                edgePoint(e, s2, point)
+                val wx1 = point[0] + point[3] * side * middle; val wz1 = point[1] - point[2] * side * middle
+                addWalk(wx0, wz0, wx1, wz1, outX, outZ, h + walk - middle)
                 s = s2
             }
+            // Street trees every so often along the outer edge of the footpath.
+            if (map.edgeClass[e] <= 6) {
+                var t = start + 6f
+                while (t < end - 6f) {
+                    edgePoint(e, t, point)
+                    val x = point[0] + point[3] * side * (h + walk + 1.8f); val z = point[1] - point[2] * side * (h + walk + 1.8f)
+                    if (spotHash(x, z, 1) < 0.5f) {
+                        if (treeSpotCount * 2 + 2 > treeSpots.size) treeSpots = treeSpots.copyOf(treeSpots.size * 2)
+                        treeSpots[treeSpotCount * 2] = x; treeSpots[treeSpotCount * 2 + 1] = z
+                        treeSpotCount++
+                    }
+                    t += 16f
+                }
+            }
+        }
+    }
+
+    private fun addWalk(x0: Float, z0: Float, x1: Float, z1: Float, outX: Float, outZ: Float, edge: Float) {
+        if (rawWalkCount * 7 + 7 > rawWalks.size) rawWalks = rawWalks.copyOf(rawWalks.size * 2)
+        val i = rawWalkCount * 7
+        rawWalks[i] = x0; rawWalks[i + 1] = z0; rawWalks[i + 2] = x1; rawWalks[i + 3] = z1
+        rawWalks[i + 4] = outX; rawWalks[i + 5] = outZ; rawWalks[i + 6] = edge
+        rawWalkCount++
+    }
+
+    /** Keeps the stretches of footpath that do not run into a building. */
+    private fun finishWalkways() {
+        val out = FloatArray(rawWalkCount * 4)
+        var n = 0
+        for (k in 0 until rawWalkCount) {
+            val i = k * 7
+            val x0 = rawWalks[i]; val z0 = rawWalks[i + 1]; val x1 = rawWalks[i + 2]; val z1 = rawWalks[i + 3]
+            if (inBuilding(x0, z0) || inBuilding(x1, z1) || inBuilding((x0 + x1) / 2, (z0 + z1) / 2)) continue
+            out[n * 4] = x0; out[n * 4 + 1] = z0; out[n * 4 + 2] = x1; out[n * 4 + 3] = z1
+            n++
+        }
+        walkways = out.copyOf(n * 4)
+        walkwayCount = n
+    }
+
+    private fun inBuilding(x: Float, z: Float): Boolean {
+        val c = chunkAt(x, z); val b = c.boxes
+        for (k in 0 until c.count) {
+            val i = k * 8
+            if (!c.blocksView[k] || b[i + 6] > 0.5f || b[i + 7] < 2.5f) continue
+            val dx = x - b[i]; val dz = z - b[i + 1]
+            val u = dx * b[i + 2] + dz * b[i + 3]; val v = -dx * b[i + 3] + dz * b[i + 2]
+            if (abs(u) < b[i + 4] + 0.3f && abs(v) < b[i + 5] + 0.3f) return true
+        }
+        return false
+    }
+
+    /** Tea stalls and fruit carts just off the footpath, facing the street. */
+    private fun placeStalls() {
+        for (k in 0 until rawWalkCount) {
+            val i = k * 7
+            val mx = (rawWalks[i] + rawWalks[i + 2]) / 2; val mz = (rawWalks[i + 1] + rawWalks[i + 3]) / 2
+            if (spotHash(mx, mz, 7) > 0.07f) continue
+            val ux = rawWalks[i + 4]; val uz = rawWalks[i + 5]
+            val x = mx + ux * (rawWalks[i + 6] + 1.45f); val z = mz + uz * (rawWalks[i + 6] + 1.45f)
+            if (isPaved(x, z) || isPaved(x + ux, z + uz) || isPaved(x - uz, z + ux) || isPaved(x + uz, z - ux)) continue
+            if (support(x, z, 1000f, 1.7f) > 0f) continue
+            var nearDock = false
+            for (d in 0 until dockCount) if (abs(docks[d * 3] - x) < 7f && abs(docks[d * 3 + 2] - z) < 7f) nearDock = true
+            if (nearDock) continue
+            if (spotHash(x, z, 9) < 0.55f) teaStall(x, z, -ux, -uz) else fruitCart(x, z, -ux, -uz)
+            solid(x, z, 0f, 1.3f, 1.3f, 0f, 2.5f, false)
+        }
+    }
+
+    /** A box turned to face (fx, fz): u runs across, v toward the front. */
+    private fun obox(m: MeshBuilder, cx: Float, cz: Float, fx: Float, fz: Float, u0: Float, u1: Float, v0: Float, v1: Float, y0: Float, y1: Float, color: Int, material: Int) {
+        val rx = -fz; val rz = fx
+        val ax = cx + rx * u0 + fx * v0; val az = cz + rz * u0 + fz * v0
+        val bx = cx + rx * u1 + fx * v0; val bz = cz + rz * u1 + fz * v0
+        val qx = cx + rx * u1 + fx * v1; val qz = cz + rz * u1 + fz * v1
+        val dx = cx + rx * u0 + fx * v1; val dz = cz + rz * u0 + fz * v1
+        val mx = (ax + qx) / 2; val mz = (az + qz) / 2
+        wall(m, ax, az, bx, bz, y0, y1, mx, mz, color, material)
+        wall(m, bx, bz, qx, qz, y0, y1, mx, mz, color, material)
+        wall(m, qx, qz, dx, dz, y0, y1, mx, mz, color, material)
+        wall(m, dx, dz, ax, az, y0, y1, mx, mz, color, material)
+        upQuad(m, ax, az, bx, bz, qx, qz, dx, dz, y1, color, material)
+    }
+
+    /** Someone sitting: on a bench, or cross-legged on a counter. */
+    private fun sitter(m: MeshBuilder, x: Float, z: Float, seat: Float, shirt: Int) {
+        m.box(x - 0.17f, seat, z - 0.11f, x + 0.17f, seat + 0.52f, z + 0.11f, shirt)
+        m.box(x - 0.16f, seat - 0.02f, z - 0.3f, x + 0.16f, seat + 0.12f, z + 0.1f, 0x2B2F3A)
+        m.ellipsoid(x, seat + 0.66f, z, 0.11f, 0.13f, 0.12f, 6, 4, 0x8C5A3C)
+        m.ellipsoid(x, seat + 0.72f, z + 0.02f, 0.115f, 0.08f, 0.12f, 6, 3, 0x17181A)
+    }
+
+    private fun stander(m: MeshBuilder, x: Float, z: Float, shirt: Int) {
+        m.box(x - 0.15f, 0f, z - 0.09f, x + 0.15f, 0.85f, z + 0.09f, 0x2B2F3A)
+        m.box(x - 0.19f, 0.85f, z - 0.12f, x + 0.19f, 1.45f, z + 0.12f, shirt)
+        m.ellipsoid(x, 1.6f, z, 0.11f, 0.13f, 0.12f, 6, 4, 0x8C5A3C)
+        m.ellipsoid(x, 1.66f, z + 0.02f, 0.115f, 0.08f, 0.12f, 6, 3, 0x17181A)
+    }
+
+    /** A cha stall: counter, shelf of jars, kettle on the stove, blue tarp, bench and customers. */
+    private fun teaStall(cx: Float, cz: Float, fx: Float, fz: Float) {
+        val m = meshChunk(cx, cz, 4f).detail
+        val rx = -fz; val rz = fx
+        fun px(u: Float, v: Float) = cx + rx * u + fx * v
+        fun pz(u: Float, v: Float) = cz + rz * u + fz * v
+        val wood = 0x7A5230
+        obox(m, cx, cz, fx, fz, -0.9f, 0.9f, -0.35f, 0.35f, 0f, 0.95f, wood, Mat.PLAIN)
+        obox(m, cx, cz, fx, fz, -0.95f, 0.95f, -0.4f, 0.4f, 0.95f, 1f, 0x5A3A22, Mat.PLAIN)
+        obox(m, cx, cz, fx, fz, -0.9f, 0.9f, 0.4f, 0.6f, 0f, 1.9f, 0x6A4628, Mat.PLAIN)
+        for (k in 0..3) m.cylinder(px(-0.6f + k * 0.4f, 0.15f), 1f, pz(-0.6f + k * 0.4f, 0.15f), 0.08f, 1.28f, 0.07f, 6, 0xCFE3D8, Mat.GLASS)
+        val sx = px(0.55f, -0.15f); val sz = pz(0.55f, -0.15f)
+        m.box(sx - 0.15f, 1f, sz - 0.15f, sx + 0.15f, 1.12f, sz + 0.15f, 0x2A2C2E)
+        m.cylinder(sx, 1.12f, sz, 0.13f, 1.36f, 0.09f, 8, 0xA9B0B4, Mat.GLOSSY)
+        for (u in floatArrayOf(-1.15f, 1.15f)) for (v in floatArrayOf(-1f, 0.65f)) {
+            val x = px(u, v); val z = pz(u, v)
+            m.box(x - 0.04f, 0f, z - 0.04f, x + 0.04f, if (v < 0f) 2.1f else 2.38f, z + 0.04f, 0x4A4E52)
+        }
+        val ax = px(-1.3f, -1.15f); val az = pz(-1.3f, -1.15f); val bx = px(1.3f, -1.15f); val bz = pz(1.3f, -1.15f)
+        val qx = px(1.3f, 0.8f); val qz = pz(1.3f, 0.8f); val dx = px(-1.3f, 0.8f); val dz = pz(-1.3f, 0.8f)
+        m.quad(ax, 2.1f, az, bx, 2.1f, bz, qx, 2.4f, qz, dx, 2.4f, dz, 0x2D6EB0)
+        m.quad(ax, 2.09f, az, dx, 2.39f, dz, qx, 2.39f, qz, bx, 2.09f, bz, 0x245A92)
+        wall(m, px(-0.8f, -1.17f), pz(-0.8f, -1.17f), px(0.8f, -1.17f), pz(0.8f, -1.17f), 2.1f, 2.4f, cx, cz, 0xC8202A, Mat.PLAIN)
+        wall(m, px(-0.6f, -1.18f), pz(-0.6f, -1.18f), px(0.6f, -1.18f), pz(0.6f, -1.18f), 2.19f, 2.31f, cx, cz, 0xF4F2EA, Mat.PLAIN)
+        m.ellipsoid(px(-1f, -1f), 1.75f, pz(-1f, -1f), 0.14f, 0.22f, 0.14f, 6, 3, 0xE8C838)
+        m.ellipsoid(px(1f, -1f), 1.75f, pz(1f, -1f), 0.14f, 0.22f, 0.14f, 6, 3, 0xD8B830)
+        obox(m, cx, cz, fx, fz, -0.85f, 0.85f, -1.15f, -0.85f, 0.4f, 0.47f, wood, Mat.PLAIN)
+        sitter(m, px(-0.4f, -1f), pz(-0.4f, -1f), 0.47f, 0xF2F0E8)
+        sitter(m, px(0.35f, -1f), pz(0.35f, -1f), 0.47f, 0x2D5DA8)
+        sitter(m, px(-0.3f, 0f), pz(-0.3f, 0f), 1f, 0xE8E2D2)
+    }
+
+    /** A fruit seller's cart under a big umbrella, piled with oranges, apples, bananas and guavas. */
+    private fun fruitCart(cx: Float, cz: Float, fx: Float, fz: Float) {
+        val m = meshChunk(cx, cz, 4f).detail
+        val rx = -fz; val rz = fx
+        fun px(u: Float, v: Float) = cx + rx * u + fx * v
+        fun pz(u: Float, v: Float) = cz + rz * u + fz * v
+        obox(m, cx, cz, fx, fz, -0.9f, 0.9f, -0.55f, 0.55f, 0.7f, 0.8f, 0x6A4628, Mat.PLAIN)
+        for (u in floatArrayOf(-0.8f, 0.8f)) for (v in floatArrayOf(-0.45f, 0.45f)) {
+            val x = px(u, v); val z = pz(u, v)
+            m.box(x - 0.04f, 0f, z - 0.04f, x + 0.04f, 0.7f, z + 0.04f, 0x3A2A1A)
+        }
+        val first = (spotHash(cx, cz, 15) * 4f).toInt()
+        for (k in 0..5) {
+            val u = -0.6f + (k % 3) * 0.6f; val v = if (k < 3) -0.25f else 0.25f
+            m.ellipsoid(px(u, v), 0.9f, pz(u, v), 0.27f, 0.14f, 0.22f, 7, 3, fruitColors[(k + first) % 4])
+        }
+        val ux = px(0f, 0f); val uz = pz(0f, 0f)
+        m.box(ux - 0.025f, 0.8f, uz - 0.025f, ux + 0.025f, 2.5f, uz + 0.025f, 0x5A5E60)
+        m.cylinder(ux, 2.1f, uz, 1.35f, 2.55f, 0.05f, 10, 0xD84A3A, cap = false)
+        stander(m, px(0.2f, 0.9f), pz(0.2f, 0.9f), 0xF2F0E8)
+    }
+
+    /** A cloth banner strung across the street from the pole at (x, z) to (x2, z2). */
+    private fun banner(m: MeshBuilder, x: Float, z: Float, x2: Float, z2: Float, dx: Float, dz: Float) {
+        thinLine(m, x, 6.3f, z, x2, 6.3f, z2)
+        val color = bannerColors[min(bannerColors.size - 1, (spotHash(x, z, 14) * bannerColors.size).toInt())]
+        val ax = x + (x2 - x) * 0.22f; val az = z + (z2 - z) * 0.22f
+        val bx = x + (x2 - x) * 0.78f; val bz = z + (z2 - z) * 0.78f
+        val mx = (ax + bx) / 2; val mz = (az + bz) / 2
+        for (side in intArrayOf(1, -1)) {
+            val o = 0.01f * side
+            wall(m, ax + dx * o, az + dz * o, bx + dx * o, bz + dz * o, 5.35f, 6.28f, mx - dx * side, mz - dz * side, color, Mat.PLAIN)
+            val o2 = 0.02f * side
+            val lx = ax + (bx - ax) * 0.12f + dx * o2; val lz = az + (bz - az) * 0.12f + dz * o2
+            val rx = ax + (bx - ax) * 0.88f + dx * o2; val rz = az + (bz - az) * 0.88f + dz * o2
+            wall(m, lx, lz, rx, rz, 5.66f, 5.96f, mx - dx * side, mz - dz * side, 0xF4F2EA, Mat.PLAIN)
+        }
+    }
+
+    /** A rooftop advertising hoarding on its steel frame, lit from above at night. */
+    private fun billboard(i: Int, top: Float, chunk: Chunk) {
+        val m = chunk.detail
+        val a = map.boxAngle[i]
+        var ux = cos(a); var uz = sin(a); var vx = -uz; var vz = ux
+        var hu = map.boxHalfX[i]; var hv = map.boxHalfZ[i]
+        if (hv > hu) { val tx = ux; val tz = uz; ux = vx; uz = vz; vx = -tx; vz = -tz; val t = hu; hu = hv; hv = t }
+        if (hu < 4f) return
+        val half = min(5f, hu * 0.85f)
+        val cx = map.boxX[i] + vx * hv * 0.7f; val cz = map.boxZ[i] + vz * hv * 0.7f
+        val y0 = top + PARAPET + 1.3f; val y1 = y0 + 3.6f
+        val x0 = cx - ux * half; val z0 = cz - uz * half; val x1 = cx + ux * half; val z1 = cz + uz * half
+        for (k in 0..3) {
+            val t = -half * 0.8f + k * (half * 1.6f / 3f)
+            val px = cx + ux * t - vx * 0.35f; val pz = cz + uz * t - vz * 0.35f
+            m.box(px - 0.08f, top, pz - 0.08f, px + 0.08f, y1, pz + 0.08f, 0x3A3D40)
+        }
+        val pick = min(5, (spotHash(cx, cz, 12) * 6f).toInt()) * 3
+        val bg = adColors[pick]; val c1 = adColors[pick + 1]; val c2 = adColors[pick + 2]
+        wall(m, x0, z0, x1, z1, y0, y1, cx - vx, cz - vz, bg, Mat.PLAIN)
+        wall(m, x0 - vx * 0.15f, z0 - vz * 0.15f, x1 - vx * 0.15f, z1 - vz * 0.15f, y0, y1, cx + vx, cz + vz, 0x2A2C2E, Mat.PLAIN)
+        fun layer(u0: Float, u1: Float, b: Float, t: Float, color: Int, material: Int = Mat.PLAIN) {
+            wall(m, cx + ux * u0 + vx * 0.02f, cz + uz * u0 + vz * 0.02f, cx + ux * u1 + vx * 0.02f, cz + uz * u1 + vz * 0.02f, y0 + b, y0 + t, cx - vx, cz - vz, color, material)
+        }
+        layer(-half * 0.94f, -half * 0.12f, 0.25f, 3.35f, c1)
+        layer(-half * 0.02f, half * 0.9f, 2.3f, 2.85f, c2)
+        layer(-half * 0.02f, half * 0.75f, 1.5f, 1.85f, c2)
+        layer(-half * 0.02f, half * 0.55f, 0.75f, 1.05f, c1)
+        wall(m, x0 + vx * 0.5f, z0 + vz * 0.5f, x1 + vx * 0.5f, z1 + vz * 0.5f, y1 + 0.05f, y1 + 0.14f, cx - vx, cz - vz, 0xFFF2D0, Mat.LAMP)
+        solid(cx, cz, atan2(uz, ux), half, 0.4f, top, y1 + 0.2f)
+    }
+
+    /** A sodium lamp on an arm reaching over the road from a pole at (x, z); (dx, dz) points at the road. */
+    private fun streetLamp(m: MeshBuilder, c: Chunk, x: Float, z: Float, dx: Float, dz: Float) {
+        val hx = x + dx * 1.7f; val hz = z + dz * 1.7f
+        m.box(min(x, hx) - 0.05f, 7.05f, min(z, hz) - 0.05f, max(x, hx) + 0.05f, 7.15f, max(z, hz) + 0.05f, 0x5B5E60)
+        m.box(hx - 0.28f, 6.9f, hz - 0.28f, hx + 0.28f, 7.08f, hz + 0.28f, 0x45484A)
+        m.box(hx - 0.22f, 6.86f, hz - 0.22f, hx + 0.22f, 6.9f, hz + 0.22f, 0xFFC27A, Mat.LAMP)
+        val r = 7.5f; val y = ROAD_Y + 0.012f
+        for (i in 0 until 10) {
+            val a = i * 2 * PI_F / 10; val b = (i + 1) * 2 * PI_F / 10
+            c.glow.shadeQuad(hx, y, hz, hx + cos(a) * r, y, hz + sin(a) * r, hx + cos(b) * r, y, hz + sin(b) * r, hx, y, hz, 0f, 1f, 1f, 0f)
         }
     }
 
@@ -452,6 +830,10 @@ class City(val map: MapData) {
             val ax = -uz * 0.9f; val az = ux * 0.9f
             m.box(min(x - ax, x + ax) - 0.05f, 8.2f, min(z - az, z + az) - 0.05f, max(x - ax, x + ax) + 0.05f, 8.32f, max(z - az, z + az) + 0.05f, 0x5B5E60)
             solid(x, z, 0f, 0.15f, 0.15f, 0f, 9f, false)
+            streetLamp(m, meshChunk(x, z, 10f), x, z, -point[3], point[2])
+            if (k > 0 && map.edgeClass[e] in 3..5 && spotHash(x, z, 13) < 0.35f) {
+                banner(m, x, z, point[0] - point[3] * side, point[1] + point[2] * side, point[2], point[3])
+            }
             if (k > 0) {
                 for (strand in 0..2) {
                     val o = (strand - 1f) * 0.5f
@@ -601,20 +983,79 @@ class City(val map: MapData) {
                 wall(m, ax, az, bx, bz, 0f, top, cx, cz, color, facade)
             }
         }
+        contactShade(from, n, cx, cz, chunk.shade)
         val shed = kind == MapData.SHED
-        flat(m, map.buildingX, map.buildingZ, from, to, top, if (shed) (if (tintRoll % 3 == 0) 0x5E7C9A else 0x9A6B4F) else 0xD9D6CF,
+        val walled = !shed && kind != MapData.TOWER && kind != MapData.MALL
+        if (walled) relief(i, from, n, top, shopHeight, color, chunk)
+        flat(m, map.buildingX, map.buildingZ, from, to, top,if (shed) (if (tintRoll % 3 == 0) 0x5E7C9A else 0x9A6B4F) else 0xD9D6CF,
             Mat.of(if (shed) Tex.METAL else Tex.ROOF))
-        solid(cx, cz, map.boxAngle[i], map.boxHalfX[i], map.boxHalfZ[i], 0f, top + 0.3f)
+        solid(cx, cz, map.boxAngle[i], map.boxHalfX[i], map.boxHalfZ[i], 0f, top + if (walled) PARAPET else 0.3f)
 
-        if (shopHeight > 0f) signboards(from, n, cx, cz)
+        if (shopHeight > 0f) signboards(from, n, cx, cz, top)
         when (kind) {
             MapData.APARTMENT, MapData.HOUSE, MapData.COMMERCIAL, MapData.EDUCATION, MapData.HOSPITAL -> rooftop(i, top, chunk)
             MapData.MOSQUE -> mosque(i, top, chunk)
         }
+        if ((kind == MapData.APARTMENT || kind == MapData.COMMERCIAL) && floors >= 6 && spotHash(cx, cz, 11) < 0.15f) billboard(i, top, chunk)
+    }
+
+    /**
+     * What makes a Dhaka block read as solid rather than a painted box: a parapet wall around the
+     * roof, and a concrete sunshade (chajja) over the windows of every floor, lined up with the
+     * floors painted in the facade texture.
+     */
+    private fun relief(i: Int, from: Int, n: Int, top: Float, shopHeight: Float, color: Int, chunk: Chunk) {
+        val cx = map.boxX[i]; val cz = map.boxZ[i]
+        val trim = Mat.of(Tex.CONCRETE)
+        val parapet = PARAPET
+        val ledges = map.floors[i] in 3..16
+        for (k in 0 until n) {
+            val a = from + k; val b = from + (k + 1) % n
+            val ax = map.buildingX[a]; val az = map.buildingZ[a]; val bx = map.buildingX[b]; val bz = map.buildingZ[b]
+            val length = hypot(bx - ax, bz - az)
+            if (length < 0.5f) continue
+            val ux = (bx - ax) / length; val uz = (bz - az) / length
+            var nx = -uz; var nz = ux
+            if (nx * ((ax + bx) / 2 - cx) + nz * ((az + bz) / 2 - cz) < 0f) { nx = -nx; nz = -nz }
+
+            // Parapet: the outside continues the wall, the inside and the cap only show up close.
+            wall(chunk.mesh, ax, az, bx, bz, top, top + parapet, cx, cz, color, trim)
+            if (length < 1.2f) continue
+            val t = 0.2f
+            val ix0 = ax - nx * t + ux * t; val iz0 = az - nz * t + uz * t
+            val ix1 = bx - nx * t - ux * t; val iz1 = bz - nz * t - uz * t
+            wall(chunk.detail, ix0, iz0, ix1, iz1, top, top + parapet, ix0 + nx * 50f, iz0 + nz * 50f, color, trim)
+            upQuad(chunk.detail, ax, az, bx, bz, ix1, iz1, ix0, iz0, top + parapet, color, trim)
+
+            if (!ledges || length < 6f) continue
+            val d = 0.5f
+            val x0 = ax; val z0 = az; val x1 = bx; val z1 = bz
+            val ox0 = x0 + nx * d; val oz0 = z0 + nz * d; val ox1 = x1 + nx * d; val oz1 = z1 + nz * d
+            var y = CURB + 2.72f
+            while (y + 0.6f < top) {
+                // Just the slab's top: from the air that and its shadow on the wall are what show.
+                if (y > shopHeight + 0.2f) upQuad(chunk.detail, x0, z0, x1, z1, ox1, oz1, ox0, oz0, y, color, Mat.LEDGE)
+                y += 3.3f
+            }
+        }
+    }
+
+    /** Ambient occlusion on the ground around a building's footprint, darkest against the wall. */
+    private fun contactShade(from: Int, n: Int, cx: Float, cz: Float, m: MeshBuilder) {
+        val y = 0.05f; val w = 1.7f
+        for (k in 0 until n) {
+            val a = from + k; val b = from + (k + 1) % n
+            val ax = map.buildingX[a]; val az = map.buildingZ[a]; val bx = map.buildingX[b]; val bz = map.buildingZ[b]
+            val length = hypot(bx - ax, bz - az)
+            if (length < 0.8f) continue
+            var nx = -(bz - az) / length; var nz = (bx - ax) / length
+            if (nx * ((ax + bx) / 2 - cx) + nz * ((az + bz) / 2 - cz) < 0f) { nx = -nx; nz = -nz }
+            m.shadeQuad(ax, y, az, bx, y, bz, bx + nx * w, y, bz + nz * w, ax + nx * w, y, az + nz * w, 0.5f, 0.5f, 1f, 1f)
+        }
     }
 
     /** A long shop signboard over the ground floor on each of the two longest walls. */
-    private fun signboards(from: Int, n: Int, cx: Float, cz: Float) {
+    private fun signboards(from: Int, n: Int, cx: Float, cz: Float, top: Float) {
         val m = meshChunk(cx, cz, 30f).detail
         var first = -1; var second = -1; var firstLength = 0f; var secondLength = 0f
         for (k in 0 until n) {
@@ -640,6 +1081,26 @@ class City(val map: MapData) {
             val lx0 = x0 + (x1 - x0) * 0.1f + nx * 0.01f; val lz0 = z0 + (z1 - z0) * 0.1f + nz * 0.01f
             val lx1 = x0 + (x1 - x0) * 0.9f + nx * 0.01f; val lz1 = z0 + (z1 - z0) * 0.9f + nz * 0.01f
             wall(m, lx0, lz0, lx1, lz1, y0 + 0.28f, y0 + 0.47f, lx0 - nx, lz0 - nz, 0xF4F2EA, Mat.PLAIN)
+            if (k == first && length > 8f) bladeSigns(m, ax, az, bx, bz, nx, nz, length, top)
+        }
+    }
+
+    /** Signs that stick out from the wall above the shops, readable from along the street. */
+    private fun bladeSigns(m: MeshBuilder, ax: Float, az: Float, bx: Float, bz: Float, nx: Float, nz: Float, length: Float, top: Float) {
+        val ux = (bx - ax) / length; val uz = (bz - az) / length
+        val y1 = min(6.4f, top - 0.4f)
+        if (y1 < 4.6f) return
+        for (f in floatArrayOf(0.2f, 0.72f)) {
+            val x0 = ax + (bx - ax) * f + nx * 0.12f; val z0 = az + (bz - az) * f + nz * 0.12f
+            val x1 = x0 + nx * 0.95f; val z1 = z0 + nz * 0.95f
+            val color = signColors[min(signColors.size - 1, (spotHash(x0, z0, 17) * signColors.size).toInt())]
+            wall(m, x0, z0, x1, z1, 3.7f, y1, x0 - ux, z0 - uz, color, Mat.PLAIN)
+            wall(m, x0, z0, x1, z1, 3.7f, y1, x0 + ux, z0 + uz, color, Mat.PLAIN)
+            for (s in floatArrayOf(1f, -1f)) {
+                val o = 0.012f * s
+                wall(m, x0 + nx * 0.15f + ux * o, z0 + nz * 0.15f + uz * o, x0 + nx * 0.8f + ux * o, z0 + nz * 0.8f + uz * o,
+                    3.9f, y1 - 0.25f, x0 - ux * s, z0 - uz * s, 0xF4F2EA, Mat.PLAIN)
+            }
         }
     }
 

@@ -13,12 +13,15 @@ class HeadPose {
         /** Sensor to photon on a phone is two to three frames; looking this far ahead cancels most of it. */
         const val LOOKAHEAD = 0.032f
         private const val STILL = 0.15f
+        /** Below this turn rate (rad/s, about 3 degrees a second) the head counts as still. */
+        private const val RESTING = 0.06f
     }
 
     private val delta = FloatArray(16)
     private val predicted = FloatArray(16)
     private val reference = FloatArray(16)
     private var yawOffset = 0f
+    private var lastYaw = Float.NaN
 
     /**
      * @param world screen axes in a gravity-aligned world.
@@ -27,7 +30,16 @@ class HeadPose {
      */
     fun resolve(out: FloatArray, world: FloatArray, wx: Float, wy: Float, wz: Float, seconds: Float, recenter: Boolean) {
         val rate = sqrt(wx * wx + wy * wy + wz * wz)
-        // Fade prediction out near rest so sensor noise cannot make a still view shimmer.
+        // Orientation without a compass drifts in heading even on a still head, which in a headset
+        // looks like the world slowly turning. While the gyroscope says the head is still, any change
+        // of heading is drift and is taken back out.
+        val hx = -world[8]; val hz = -world[10]
+        if (hypot(hx, hz) > 0.3f) {
+            val yaw = atan2(hx, -hz)
+            val change = wrapAngle(yaw - lastYaw)
+            if (!lastYaw.isNaN() && rate < RESTING && abs(change) < 0.01f) yawOffset = wrapAngle(yawOffset + change)
+            lastYaw = yaw
+        }        // Fade prediction out near rest so sensor noise cannot make a still view shimmer.
         val angle = min(0.35f, rate * seconds * min(1f, rate / STILL))
         if (angle > 1e-5f) {
             axisAngle(delta, wx / rate, wy / rate, wz / rate, angle)

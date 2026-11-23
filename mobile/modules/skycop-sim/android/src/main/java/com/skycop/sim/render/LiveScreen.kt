@@ -8,9 +8,9 @@ import kotlin.math.min
 import kotlin.math.tan
 
 /**
- * The live camera in VR: the video hangs as a screen three meters ahead in a dark room and stays put
- * while the head moves. The screen takes the video's own shape, upright, after applying the rotation
- * a phone camera sends with each frame, so nothing is ever cropped whichever way the camera is held.
+ * The live camera in VR: a still picture in each eye, filling it as far as the video's shape allows,
+ * with no head tracking. It takes the video's own shape, upright, after applying the rotation a
+ * phone camera sends with each frame, so nothing is ever cropped whichever way the camera is held.
  */
 internal class LiveScreen {
     private companion object {
@@ -73,7 +73,7 @@ void main() {
 
     /** The dark room around the screen; once for both eyes, since a clear ignores the viewport. */
     fun clear() {
-        glClearColor(0.035f, 0.04f, 0.05f, 1f)
+        glClearColor(0f, 0f, 0f, 1f)
         glClear(GL_COLOR_BUFFER_BIT or GL_DEPTH_BUFFER_BIT)
     }
 
@@ -122,15 +122,11 @@ void main() {
         if (!hasVideo) return
 
         val a = uprightAspect
-        var halfHeight: Float
-        if (vr) {
-            // About 66 degrees across for a wide picture, 60 degrees tall for an upright one.
-            halfHeight = if (a >= 1f) min(DISTANCE * tan(33f * DEG) / a, DISTANCE * tan(30f * DEG)) else DISTANCE * tan(30f * DEG)
-        } else {
-            // On a flat screen the picture simply fills the view, letterboxed, never cropped.
-            val fitHeight = DISTANCE * tanHalfY * 0.94f
-            halfHeight = min(fitHeight, fitHeight * viewAspect / a)
-        }
+        // As big as each eye allows with the whole frame in view: it fills the eye's height or
+        // width, whichever the picture's shape reaches first. In a headset a sliver is kept clear
+        // so the lens correction does not push the frame's edges out of sight.
+        val fitHeight = DISTANCE * tanHalfY * (if (vr) 0.96f else 1f)
+        val halfHeight = min(fitHeight, fitHeight * viewAspect / a)
         val halfWidth = halfHeight * a
 
         Mat4.perspective(projection, tanHalfY, viewAspect, 0.05f, 50f)
@@ -142,7 +138,7 @@ void main() {
         glBindVertexArray(vao)
 
         // A thin dark frame behind the picture.
-        glUniform4f(solid, 0.11f, 0.12f, 0.13f, 1f)
+        glUniform4f(solid, 0f, 0f, 0f, 1f)
         glUniform4f(rect, halfWidth + 0.04f, halfHeight + 0.04f, DISTANCE + 0.01f, 0f)
         glDrawArrays(GL_TRIANGLES, 0, 6)
 

@@ -261,7 +261,8 @@ internal class SimRenderer(
             glViewport(i * eyeWidth, 0, eyeWidth, usedHeight)
             val offset = if (eyes == 1) 0f else (i * 2 - 1) * EYE_OFFSET
             if (watching) {
-                live!!.drawEye(basis, basis[0] * offset, basis[1] * offset, basis[2] * offset, tanHalf, aspect, settings.vr)
+                // The same flat picture in both eyes, centered.
+                live!!.drawEye(basis, 0f, 0f, 0f, tanHalf, aspect, settings.vr)
             } else {
                 world.drawEye(
                     basis, eye[0] + basis[0] * offset, eye[1] + basis[1] * offset, eye[2] + basis[2] * offset,

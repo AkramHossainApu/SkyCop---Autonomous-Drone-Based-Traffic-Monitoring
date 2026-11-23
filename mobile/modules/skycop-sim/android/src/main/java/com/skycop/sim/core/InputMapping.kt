@@ -63,11 +63,24 @@ class PadState {
  * Values are never expired: Android only sends an event when an axis changes.
  */
 class InputMapping {
+    private companion object {
+        const val STILL_FRAMES = 90
+        const val MAX_DRIFT = 0.28f
+    }
+
     private val channel = IntArray(6) { -1 }
     private val direction = FloatArray(6) { 1f }
     private val rest = FloatArray(6)
     private val span = FloatArray(6) { 1f }
     private val moved = BooleanArray(6)
+    /**
+     * Where each stick really rests. Worn or cheap sticks sit a little off center, just past the
+     * deadzone, which reads as a steady push and makes a hovering drone creep away; a small offset
+     * that stays perfectly still for a second and a half is taken as the new center.
+     */
+    private val drift = FloatArray(4)
+    private val lastRaw = FloatArray(4)
+    private val still = IntArray(4)
     private var altLeft = -1
     private var altRight = -1
     private var undecided = false
@@ -149,7 +162,12 @@ class InputMapping {
 
     private fun signed(slot: Int, raw: FloatArray): Float {
         val axis = channel[slot]
-        return if (axis < 0) 0f else ((raw[axis] - rest[slot]) * direction[slot]).coerceIn(-1f, 1f)
+        if (axis < 0) return 0f
+        val value = (raw[axis] - rest[slot]) * direction[slot]
+        if (abs(raw[axis] - lastRaw[slot]) < 0.004f) still[slot]++ else still[slot] = 0
+        lastRaw[slot] = raw[axis]
+        if (still[slot] > STILL_FRAMES && abs(value) < MAX_DRIFT) drift[slot] = value
+        return (value - drift[slot]).coerceIn(-1f, 1f)
     }
 
     private fun trigger(slot: Int, raw: FloatArray, alternative: Int, pressed: Boolean): Float {

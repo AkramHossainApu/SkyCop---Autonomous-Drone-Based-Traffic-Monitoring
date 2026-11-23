@@ -114,9 +114,20 @@ final class HeadPose {
   private var predicted = [Float](repeating: 0, count: 16)
   private var reference = [Float](repeating: 0, count: 16)
   private var yawOffset: Float = 0
+  /// Below this turn rate (rad/s) the head counts as still; see HeadPose.kt.
+  private static let RESTING: Float = 0.06
+  private var lastYaw = Float.nan
 
   func resolve(_ out: inout [Float], _ world: [Float], _ wx: Float, _ wy: Float, _ wz: Float, _ seconds: Float, _ recenter: Bool) {
     let rate = sqrt(wx * wx + wy * wy + wz * wz)
+    // Heading drift on a still head is taken back out (see HeadPose.kt).
+    let hx = -world[8], hz = -world[10]
+    if hypot(hx, hz) > 0.3 {
+      let yaw = atan2(hx, -hz)
+      let change = wrapAngle(yaw - lastYaw)
+      if !lastYaw.isNaN && rate < HeadPose.RESTING && abs(change) < 0.01 { yawOffset = wrapAngle(yawOffset + change) }
+      lastYaw = yaw
+    }
     let angle = min(0.35, rate * seconds * min(1, rate / HeadPose.STILL))
     if angle > 1e-5 {
       axisAngle(&delta, wx / rate, wy / rate, wz / rate, angle)

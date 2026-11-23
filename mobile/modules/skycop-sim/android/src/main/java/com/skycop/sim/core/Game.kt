@@ -26,6 +26,8 @@ enum class MenuItem(val label: String) {
     RESUME("RESUME FLIGHT"),
     EXIT("EXIT SIMULATION"),
     MAP("MAP"),
+    TIME("TIME OF DAY"),
+    WEATHER("WEATHER"),
     LAYOUT("CONTROL LAYOUT"),
     CONTROLS("SHOW CONTROLS"),
     CALIBRATE("CALIBRATE CONTROLLER"),
@@ -51,6 +53,8 @@ class Game(val city: City, val settings: Settings, private var host: GameHost, v
     val traffic = Traffic(city)
     val drone = DroneSim(city, traffic)
     val camera = CameraRig(city)
+    val environment = Environment()
+    val pedestrians = Pedestrians(city)
     val calibration = Calibration()
     val menu = MenuItem.values()
 
@@ -71,7 +75,7 @@ class Game(val city: City, val settings: Settings, private var host: GameHost, v
         private set
     /** Set by the renderer: a frame of live video has arrived. */
     var liveHasVideo = false
-    /** Head orientation for the live screen, which is fixed in the room. */
+    /** The live picture is fixed to the view, not the room: no head tracking, always straight ahead. */
     val liveBasis = FloatArray(16).also { Mat4.identity(it) }
     var liveSince = 0f
         private set
@@ -120,9 +124,9 @@ class Game(val city: City, val settings: Settings, private var host: GameHost, v
             Screen.CONTROLS -> if (pressed and (Button.A or Button.B or Button.START) != 0) screen = Screen.MENU
             Screen.CALIBRATION -> calibrate(dt, pressed, mapping, raw)
         }
-        if (watchingLive) head.copyInto(liveBasis)
         if (screen == Screen.FLIGHT && !watchingLive) {
             traffic.update(dt)
+            pedestrians.update(dt)
             propellerAngle = (propellerAngle + drone.render.rotor * 31f * dt) % (2 * PI_F)
         }
         camera.update(if (screen == Screen.FLIGHT) dt else 0f, drone.render, settings.vr, tracked, head)
@@ -174,6 +178,8 @@ class Game(val city: City, val settings: Settings, private var host: GameHost, v
 
         drone.yawSensitivity = settings.sensitivity / 100f
         drone.windEnabled = settings.wind
+        environment.update(dt, settings)
+        drone.windScale = environment.gust
         val before = drone.phase
         if (pressed and Button.A != 0) {
             if (drone.phase == Phase.LANDED && !drone.canTakeOff) show("BATTERY EMPTY - LET IT CHARGE ON A DOCK")
@@ -315,6 +321,8 @@ class Game(val city: City, val settings: Settings, private var host: GameHost, v
                 host.mapChanged()
                 return
             }
+            MenuItem.TIME -> s.timeOfDay = cycle(s.timeOfDay, by, 0, Environment.TIMES.size - 1)
+            MenuItem.WEATHER -> s.weather = cycle(s.weather, by, 0, Environment.WEATHERS.size - 1)
             MenuItem.SENSITIVITY -> s.sensitivity = cycle(s.sensitivity, by * 10, 50, 150)
             MenuItem.DEADZONE -> s.deadzone = cycle(s.deadzone, by * 2, 4, 30)
             MenuItem.SPACING -> s.lensSpacing = cycle(s.lensSpacing, by * 2, -10, 10)

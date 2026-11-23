@@ -103,6 +103,8 @@ class DroneSim(private val city: City, private val traffic: Traffic) {
         private set
     var yawSensitivity = 1f
     var windEnabled = true
+    /** Gustier in the monsoon rain (Environment.gust). */
+    var windScale = 1f
 
     /** Strongest bump since the host last cleared it; used for rumble and camera feedback. */
     var impact = 0f
@@ -503,7 +505,7 @@ class DroneSim(private val city: City, private val traffic: Traffic) {
 
         var windX = 0f; var windZ = 0f
         if (windEnabled && aboveGround > 0.2f) {
-            val strength = 0.15f + min(pose.y, 80f) * 0.004f
+            val strength = (0.15f + min(pose.y, 80f) * 0.004f) * windScale
             windX = strength * (0.6f + sin(time * 0.7f) * 0.3f + sin(time * 2.3f) * 0.2f)
             windZ = strength * (0.3f + sin(time * 0.43f + 2f) * 0.4f + sin(time * 1.7f) * 0.15f)
         }

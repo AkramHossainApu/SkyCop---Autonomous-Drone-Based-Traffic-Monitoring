@@ -11,12 +11,19 @@ final class City {
   static let DOCK_TOP: Float = 7.2
   static let DOCK_RADIUS: Float = 1.7
   static let ROAD_Y: Float = 0.06
+  /// The low wall around a flat roof.
+  static let PARAPET: Float = 1.0
+  fileprivate static let GRID = 2000
   static let ASPHALT = 0xC9C9C6
   private static let WIRE = 0x23262A
 
   final class Chunk {
     let mesh = MeshBuilder()
     let detail = MeshBuilder()
+    /// Soft darkening decals (contact shadows, grime, worn lanes) multiplied over what is drawn.
+    let shade = MeshBuilder()
+    /// Pools of lamp light, added over the streets at night: gray 0 is the brightest.
+    let glow = MeshBuilder()
     let x: Float, z: Float
     var top: Float = 6
     var reach: Float = City.CELL / 2
@@ -47,6 +54,23 @@ final class City {
   private(set) var junctionRadius: [Float]
 
   private var random = KotlinRandom(seed: 2026)
+  /// Spots along the footpaths where a street tree may go, once the buildings are known.
+  private var treeSpots: [Float] = []
+  /// Footpath center lines for the walkers: x0, z0, x1, z1 for each stretch.
+  private(set) var walkways: [Float] = []
+  private(set) var walkwayCount = 0
+  /// Each stretch as found: x0, z0, x1, z1, outward x, outward z, distance to the footpath's outer edge.
+  private var rawWalks: [Float] = []
+  private let adColors = [
+    0xF6C324, 0xD11F2A, 0x1A1A1A, 0x1E5AA8, 0xF2F2F2, 0xF6C324, 0xE2342D, 0xF2F2F2, 0x1A1A1A,
+    0x1F8A4C, 0xF6C324, 0xF2F2F2, 0x6B2C91, 0xF2F2F2, 0xF29A2E, 0xF2F2F2, 0xE2342D, 0x1E5AA8,
+  ]
+  private let bannerColors = [0xC8202A, 0x1D7A3E, 0xF0B323, 0xF4F4F0, 0x1F4E9A, 0xE8641C]
+  private let fruitColors = [0xE8902A, 0xC8302A, 0xE8C838, 0x7CB342]
+  /// One meter cells covered by a road, path, canal or junction, so street trees stay off them.
+  private var paved = [Bool](repeating: false, count: City.GRID * City.GRID)
+  /// Just the carriageways, so a footpath is never laid on or beside another road.
+  private var roads = [Bool](repeating: false, count: City.GRID * City.GRID)
   private var point: [Float] = [0, 0, 0, 0]
   private let apartmentTints = [0xF4F1EA, 0xEFE4CF, 0xE9D9BE, 0xDCDCD6, 0xF3E3B5, 0xF0CDB4, 0xCFDDE6, 0xD9E6D1, 0xE8C9C0, 0xC7C2B8]
   private let houseTints = [0xEFE7D6, 0xE6C9A0, 0xD8E4D8, 0xF2DCC4, 0xD7CFC4, 0xF4E9C9]
@@ -69,7 +93,11 @@ final class City {
     for i in 0..<map.areaCount { buildArea(i) }
     for i in 0..<map.ribbonCount { buildRibbon(i) }
     buildRoads()
+    roads = []
     for i in 0..<map.buildingCount { buildBuilding(i) }
+    finishWalkways()
+    placeStalls()
+    plantStreetTrees()
     for i in 0..<map.landmarkCount { buildLandmark(i) }
     for d in 0..<dockCount { buildDock(map.dockX[d], map.dockZ[d]) }
     buildTerrain()
@@ -235,6 +263,7 @@ final class City {
     let leaves = Mat.of(.leaves)
     m.ellipsoid(x, 3.4 * s, z, 2.1 * s, 1.5 * s, 2 * s, 6, 4, color, leaves, bumps: 0.25)
     m.ellipsoid(x + 0.4 * s, 4.5 * s, z - 0.3 * s, 1.3 * s, 1.1 * s, 1.3 * s, 5, 3, color, leaves, bumps: 0.3)
+    m.ellipsoid(x - 0.9 * s, 3.9 * s, z + 0.7 * s, 1.15 * s, 0.95 * s, 1.1 * s, 5, 3, color, leaves, bumps: 0.35)
     solid(x, z, 0, 1.5 * s, 1.5 * s, 2.1 * s, 5.4 * s, false)
     solid(x, z, 0, 0.22, 0.22, 0, 2.1 * s, false)
   }
@@ -243,6 +272,10 @@ final class City {
     let from = map.ribbonStart[i], to = map.ribbonStart[i + 1]
     if to - from < 2 { return }
     let w = map.ribbonWidth[i]
+    for k in from..<(to - 1) { pave(map.ribbonX[k], map.ribbonZ[k], map.ribbonX[k + 1], map.ribbonZ[k + 1], w / 2 + 1.2) }
+    if map.ribbonKind[i] == MapData.MINOR_ROAD {
+      for k in from..<(to - 1) { pave(map.ribbonX[k], map.ribbonZ[k], map.ribbonX[k + 1], map.ribbonZ[k + 1], w / 2 + 0.2, roadsOnly: true) }
+    }
     let c = meshChunk(map.ribbonX[from], map.ribbonZ[from], w)
     for k in from..<to { c.reach = max(c.reach, max(abs(map.ribbonX[k] - c.x), abs(map.ribbonZ[k] - c.z)) + w) }
     switch map.ribbonKind[i] {
@@ -266,6 +299,13 @@ final class City {
       widest[a] = max(widest[a], h); widest[b] = max(widest[b], h)
     }
     for n in 0..<map.nodeCount { junctionRadius[n] = degree[n] >= 3 ? widest[n] + 1.2 : 0 }
+    // Every carriageway first (see City.kt): the strip between a divided road's halves is a median.
+    for e in 0..<map.edgeCount {
+      let from = map.edgeStart[e], to = map.edgeStart[e + 1]
+      if to - from < 2 { continue }
+      for k in from..<(to - 1) { pave(map.edgeX[k], map.edgeZ[k], map.edgeX[k + 1], map.edgeZ[k + 1], map.edgeWidth[e] / 2 + 0.2, roadsOnly: true) }
+    }
+    for n in 0..<map.nodeCount where degree[n] >= 2 { pave(map.nodeX[n], map.nodeZ[n], map.nodeX[n], map.nodeZ[n], widest[n] + 0.2, roadsOnly: true) }
 
     for e in 0..<map.edgeCount {
       let from = map.edgeStart[e], to = map.edgeStart[e + 1]
@@ -275,13 +315,17 @@ final class City {
       for k in from..<to { c.reach = max(c.reach, max(abs(map.edgeX[k] - c.x), abs(map.edgeZ[k] - c.z)) + width) }
       var elevated = false
       for k in from..<to where map.edgeY[k] > 0.5 { elevated = true }
+      let footpath: Float = map.edgeClass[e] <= 4 && !elevated ? (map.edgeClass[e] <= 3 ? 2.6 : 1.9) : 0.3
+      for k in from..<(to - 1) { pave(map.edgeX[k], map.edgeZ[k], map.edgeX[k + 1], map.edgeZ[k + 1], width / 2 + footpath) }
       strip(c.mesh, map.edgeX, map.edgeZ, map.edgeY, from, to, width, C.ROAD_Y, C.ASPHALT, Mat.of(.asphalt))
+      roadGrime(e, c)
       if elevated { bridge(e, c) }
       markings(e, c)
       if map.edgeClass[e] <= 4 && !elevated { sidewalks(e, c) }
       if map.edgeClass[e] >= 3 && !elevated { wires(e) }
     }
     for n in 0..<map.nodeCount {
+      if degree[n] >= 2 { pave(map.nodeX[n], map.nodeZ[n], map.nodeX[n], map.nodeZ[n], widest[n] + 2.6) }
       if degree[n] >= 2 {
         disc(meshChunk(map.nodeX[n], map.nodeZ[n], widest[n]).mesh, map.nodeX[n], map.nodeY[n] + C.ROAD_Y, map.nodeZ[n], widest[n], 12, C.ASPHALT, Mat.of(.asphalt))
       }
@@ -366,6 +410,84 @@ final class City {
     if cls <= 2 && backward > 0 && end - start > 20 && map.edgeY[map.edgeStart[e]] < 0.5 { median(e, c, start, end) }
   }
 
+  /// A soft darkening band along edge `e`, from lateral offset `o0` (gray `k0`) to `o1` (gray `k1`).
+  private func shadeBand(_ e: Int, _ m: MeshBuilder, _ o0: Float, _ o1: Float, _ k0: Float, _ k1: Float, _ lift: Float) {
+    let from = map.edgeStart[e], to = map.edgeStart[e + 1]
+    for k in from..<(to - 1) {
+      let ax = map.edgeX[k], az = map.edgeZ[k], bx = map.edgeX[k + 1], bz = map.edgeZ[k + 1]
+      let l = hypot(bx - ax, bz - az)
+      if l < 0.01 { continue }
+      let px = -(bz - az) / l, pz = (bx - ax) / l
+      let ya = map.edgeY[k] + lift, yb = map.edgeY[k + 1] + lift
+      m.shadeQuad(ax + px * o0, ya, az + pz * o0, bx + px * o0, yb, bz + pz * o0,
+                  bx + px * o1, yb, bz + pz * o1, ax + px * o1, ya, az + pz * o1, k0, k0, k1, k1)
+    }
+  }
+
+  /// Grime in the gutters along both edges and the oil-darkened middle of every lane.
+  private func roadGrime(_ e: Int, _ c: Chunk) {
+    let half = map.edgeWidth[e] / 2
+    let lift = C.ROAD_Y + 0.008
+    shadeBand(e, c.shade, -half, -half + 0.9, 0.68, 1, lift)
+    shadeBand(e, c.shade, half, half - 0.9, 0.68, 1, lift)
+    if map.edgeClass[e] > 5 { return }
+    let lanes = max(1, map.lanesForward[e] + map.lanesBackward[e])
+    let laneWidth = map.edgeWidth[e] / Float(lanes)
+    for i in 0..<lanes {
+      let middle = -half + (Float(i) + 0.5) * laneWidth
+      shadeBand(e, c.shade, middle - 0.75, middle, 1, 0.82, lift)
+      shadeBand(e, c.shade, middle, middle + 0.75, 0.82, 1, lift)
+    }
+  }
+
+  /// Marks the grid cells whose centers lie within `half` of the segment from a to b.
+  private func pave(_ ax: Float, _ az: Float, _ bx: Float, _ bz: Float, _ half: Float, roadsOnly: Bool = false) {
+    if (roadsOnly ? roads : paved).isEmpty { return }
+    let G = City.GRID
+    let i0 = min(max(Int(floor(min(ax, bx) - half + City.HALF)), 0), G - 1)
+    let i1 = min(max(Int(floor(max(ax, bx) + half + City.HALF)), 0), G - 1)
+    let j0 = min(max(Int(floor(min(az, bz) - half + City.HALF)), 0), G - 1)
+    let j1 = min(max(Int(floor(max(az, bz) + half + City.HALF)), 0), G - 1)
+    let dx = bx - ax, dz = bz - az
+    let length2 = dx * dx + dz * dz
+    for j in j0...j1 {
+      for i in i0...i1 {
+        let px = -City.HALF + Float(i) + 0.5, pz = -City.HALF + Float(j) + 0.5
+        let t = min(max(length2 > 0 ? ((px - ax) * dx + (pz - az) * dz) / length2 : 0, 0), 1)
+        let ex = ax + dx * t - px, ez = az + dz * t - pz
+        if ex * ex + ez * ez <= half * half { if roadsOnly { roads[j * G + i] = true } else { paved[j * G + i] = true } }
+      }
+    }
+  }
+
+  private func isPaved(_ x: Float, _ z: Float, roadsOnly: Bool = false) -> Bool {
+    if (roadsOnly ? roads : paved).isEmpty { return false }
+    let i = Int(floor(x + City.HALF)), j = Int(floor(z + City.HALF))
+    if i < 0 || j < 0 || i >= City.GRID || j >= City.GRID { return true }
+    return roadsOnly ? roads[j * City.GRID + i] : paved[j * City.GRID + i]
+  }
+
+  /// Street trees along the footpaths, wherever no road, building, pole or dock is in the way.
+  private func plantStreetTrees() {
+    for k in 0..<(treeSpots.count / 2) {
+      let x = treeSpots[k * 2], z = treeSpots[k * 2 + 1]
+      if isPaved(x, z) || isPaved(x - 0.7, z - 0.7) || isPaved(x + 0.7, z - 0.7) ||
+        isPaved(x - 0.7, z + 0.7) || isPaved(x + 0.7, z + 0.7) { continue }
+      if support(x, z, 1000, 2.2) > 0 { continue }
+      var nearDock = false
+      for d in 0..<dockCount where abs(docks[d * 3] - x) < 6 && abs(docks[d * 3 + 2] - z) < 6 { nearDock = true }
+      if !nearDock { tree(x, z, 0.75 + 0.45 * spotHash(x, z, 3)) }
+    }
+    paved = []
+  }
+
+  private func spotHash(_ x: Float, _ z: Float, _ seed: Int) -> Float {
+    var h = Int32(truncatingIfNeeded: javaRound(x * 10)) &* 374761393 &+ Int32(truncatingIfNeeded: javaRound(z * 10)) &* 668265263
+      &+ Int32(truncatingIfNeeded: seed) &* 1442695041
+    h = (h ^ Int32(bitPattern: UInt32(bitPattern: h) >> 13)) &* 1274126177
+    return Float((h ^ Int32(bitPattern: UInt32(bitPattern: h) >> 16)) & 0xffff) / 65536
+  }
+
   private func median(_ e: Int, _ c: Chunk, _ start: Float, _ end: Float) {
     var s = start + 4
     while s < end - 4 {
@@ -376,12 +498,21 @@ final class City {
       if l > 0.5 {
         let px = -dz / l * 0.45, pz = dx / l * 0.45
         let mx = (ax + bx) / 2, mz = (az + bz) / 2
-        let h: Float = 0.4
-        wall(c.mesh, ax + px, az + pz, bx + px, bz + pz, 0, h, mx, mz, 0xD8D4CA, Mat.of(.concrete))
-        wall(c.mesh, bx - px, bz - pz, ax - px, az - pz, 0, h, mx, mz, 0xD8D4CA, Mat.of(.concrete))
-        wall(c.mesh, ax - px, az - pz, ax + px, az + pz, 0, h, mx, mz, 0xD8D4CA, Mat.of(.concrete))
-        wall(c.mesh, bx + px, bz + pz, bx - px, bz - pz, 0, h, mx, mz, 0xD8D4CA, Mat.of(.concrete))
-        upQuad(c.mesh, ax + px, az + pz, bx + px, bz + pz, bx - px, bz - pz, ax - px, az - pz, h, 0x8DA65E, Mat.of(.grass))
+        // Dhaka's medians: kerbs painted yellow and black around a strip of soil and shrubs.
+        let h: Float = 0.35
+        let kerb = Mat.STRIPED, yellow = 0xE8B52A
+        wall(c.mesh, ax + px, az + pz, bx + px, bz + pz, 0, h, mx, mz, yellow, kerb)
+        wall(c.mesh, bx - px, bz - pz, ax - px, az - pz, 0, h, mx, mz, yellow, kerb)
+        wall(c.mesh, ax - px, az - pz, ax + px, az + pz, 0, h, mx, mz, yellow, kerb)
+        wall(c.mesh, bx + px, bz + pz, bx - px, bz - pz, 0, h, mx, mz, yellow, kerb)
+        upQuad(c.mesh, ax + px, az + pz, bx + px, bz + pz, bx - px, bz - pz, ax - px, az - pz, h, 0x8C7A5C, Mat.of(.grass))
+        var t: Float = 1.5
+        while t < l - 1 {
+          let sx = ax + dx / l * t, sz = az + dz / l * t
+          let leaf = leafColors[(Int(t * 3) + e) % leafColors.count]
+          c.detail.ellipsoid(sx, h + 0.3, sz, 0.42, 0.38, 0.42, 5, 3, leaf, Mat.of(.leaves), bumps: 0.25)
+          t += 3.5
+        }
         solid(mx, mz, atan2(dz, dx), l / 2, 0.45, 0, h)
       }
       s = s2 + 1
@@ -393,20 +524,249 @@ final class City {
     let start = junctionRadius[map.edgeA[e]] + 0.5, end = length - junctionRadius[map.edgeB[e]] - 0.5
     if end - start < 3 { return }
     let h = map.edgeWidth[e] / 2
+    let main = map.edgeClass[e] <= 3
+    let walk: Float = main ? 2.6 : 1.9
+    // Kerb stones: black and yellow on the main roads, black and white elsewhere.
+    let kerbColor = main ? 0xE8B52A : 0xE6E6E0
+    let kerb: Float = 0.24
     for side: Float in [-1, 1] {
       var s = start
       while s < end {
-        let s2 = min(end, s + 10)
+        let s2 = min(end, s + 8)
+        edgePoint(e, (s + s2) / 2, &point)
+        let median = isPaved(point[0] + point[3] * side * (h + walk * 0.5), point[1] - point[2] * side * (h + walk * 0.5), roadsOnly: true) ||
+          isPaved(point[0] + point[3] * side * (h + walk + 1), point[1] - point[2] * side * (h + walk + 1), roadsOnly: true)
         edgePoint(e, s, &point)
         let ix = point[0] + point[3] * side * h, iz = point[1] - point[2] * side * h
-        let ox = point[0] + point[3] * side * (h + 1.8), oz = point[1] - point[2] * side * (h + 1.8)
+        let kx = point[0] + point[3] * side * (h + kerb), kz = point[1] - point[2] * side * (h + kerb)
+        let ox = point[0] + point[3] * side * (h + walk), oz = point[1] - point[2] * side * (h + walk)
         edgePoint(e, s2, &point)
         let jx = point[0] + point[3] * side * h, jz = point[1] - point[2] * side * h
-        let px = point[0] + point[3] * side * (h + 1.8), pz = point[1] - point[2] * side * (h + 1.8)
-        upQuad(c.mesh, ix, iz, jx, jz, px, pz, ox, oz, C.CURB, 0xDCD7CC, Mat.of(.paving))
-        wall(c.mesh, ix, iz, jx, jz, 0, C.CURB, ox, oz, 0xC9C4B8, Mat.of(.concrete))
+        let lx = point[0] + point[3] * side * (h + kerb), lz = point[1] - point[2] * side * (h + kerb)
+        let px = point[0] + point[3] * side * (h + walk), pz = point[1] - point[2] * side * (h + walk)
+        let top = C.CURB + 0.03
+        upQuad(c.mesh, ix, iz, jx, jz, lx, lz, kx, kz, top, kerbColor, Mat.STRIPED)
+        wall(c.mesh, ix, iz, jx, jz, 0, top, ox, oz, kerbColor, Mat.STRIPED)
+        if median {
+          wall(c.mesh, kx, kz, lx, lz, 0, top, ix, iz, kerbColor, Mat.STRIPED)
+          s = s2
+          continue
+        }
+        upQuad(c.mesh, kx, kz, lx, lz, px, pz, ox, oz, C.CURB, 0xDCD7CC, Mat.of(.paving))
+        wall(c.detail, kx, kz, lx, lz, C.CURB, top, ix, iz, 0xC9C4B8, Mat.of(.concrete))
+        wall(c.mesh, ox, oz, px, pz, 0, C.CURB, ix, iz, 0xBDB7AA, Mat.of(.concrete))
+        let gx = (ox - ix) / walk * 0.9, gz = (oz - iz) / walk * 0.9
+        c.shade.shadeQuad(ox, 0.05, oz, px, 0.05, pz, px + gx, 0.05, pz + gz, ox + gx, 0.05, oz + gz, 0.62, 0.62, 1, 1)
+        let middle = h + kerb + (walk - kerb) / 2
+        edgePoint(e, s, &point)
+        let wx0 = point[0] + point[3] * side * middle, wz0 = point[1] - point[2] * side * middle
+        let outX = point[3] * side, outZ = -point[2] * side
+        edgePoint(e, s2, &point)
+        let wx1 = point[0] + point[3] * side * middle, wz1 = point[1] - point[2] * side * middle
+        rawWalks += [wx0, wz0, wx1, wz1, outX, outZ, h + walk - middle]
         s = s2
       }
+      if map.edgeClass[e] <= 6 {
+        var t = start + 6
+        while t < end - 6 {
+          edgePoint(e, t, &point)
+          let x = point[0] + point[3] * side * (h + walk + 1.8), z = point[1] - point[2] * side * (h + walk + 1.8)
+          if spotHash(x, z, 1) < 0.5 { treeSpots.append(x); treeSpots.append(z) }
+          t += 16
+        }
+      }
+    }
+  }
+
+  /// Keeps the stretches of footpath that do not run into a building.
+  private func finishWalkways() {
+    var out: [Float] = []
+    for k in 0..<(rawWalks.count / 7) {
+      let i = k * 7
+      let x0 = rawWalks[i], z0 = rawWalks[i + 1], x1 = rawWalks[i + 2], z1 = rawWalks[i + 3]
+      if inBuilding(x0, z0) || inBuilding(x1, z1) || inBuilding((x0 + x1) / 2, (z0 + z1) / 2) { continue }
+      out += [x0, z0, x1, z1]
+    }
+    walkways = out
+    walkwayCount = out.count / 4
+  }
+
+  private func inBuilding(_ x: Float, _ z: Float) -> Bool {
+    let c = chunkAt(x, z), b = c.boxes
+    for k in 0..<c.count {
+      let i = k * 8
+      if !c.blocksView[k] || b[i + 6] > 0.5 || b[i + 7] < 2.5 { continue }
+      let dx = x - b[i], dz = z - b[i + 1]
+      let u = dx * b[i + 2] + dz * b[i + 3], v = -dx * b[i + 3] + dz * b[i + 2]
+      if abs(u) < b[i + 4] + 0.3 && abs(v) < b[i + 5] + 0.3 { return true }
+    }
+    return false
+  }
+
+  /// Tea stalls and fruit carts just off the footpath, facing the street.
+  private func placeStalls() {
+    for k in 0..<(rawWalks.count / 7) {
+      let i = k * 7
+      let mx = (rawWalks[i] + rawWalks[i + 2]) / 2, mz = (rawWalks[i + 1] + rawWalks[i + 3]) / 2
+      if spotHash(mx, mz, 7) > 0.07 { continue }
+      let ux = rawWalks[i + 4], uz = rawWalks[i + 5]
+      let x = mx + ux * (rawWalks[i + 6] + 1.45), z = mz + uz * (rawWalks[i + 6] + 1.45)
+      if isPaved(x, z) || isPaved(x + ux, z + uz) || isPaved(x - uz, z + ux) || isPaved(x + uz, z - ux) { continue }
+      if support(x, z, 1000, 1.7) > 0 { continue }
+      var nearDock = false
+      for d in 0..<dockCount where abs(docks[d * 3] - x) < 7 && abs(docks[d * 3 + 2] - z) < 7 { nearDock = true }
+      if nearDock { continue }
+      if spotHash(x, z, 9) < 0.55 { teaStall(x, z, -ux, -uz) } else { fruitCart(x, z, -ux, -uz) }
+      solid(x, z, 0, 1.3, 1.3, 0, 2.5, false)
+    }
+  }
+
+  /// A box turned to face (fx, fz): u runs across, v toward the front.
+  private func obox(_ m: MeshBuilder, _ cx: Float, _ cz: Float, _ fx: Float, _ fz: Float, _ u0: Float, _ u1: Float, _ v0: Float, _ v1: Float, _ y0: Float, _ y1: Float, _ color: Int, _ material: Int) {
+    let rx = -fz, rz = fx
+    let ax = cx + rx * u0 + fx * v0, az = cz + rz * u0 + fz * v0
+    let bx = cx + rx * u1 + fx * v0, bz = cz + rz * u1 + fz * v0
+    let qx = cx + rx * u1 + fx * v1, qz = cz + rz * u1 + fz * v1
+    let dx = cx + rx * u0 + fx * v1, dz = cz + rz * u0 + fz * v1
+    let mx = (ax + qx) / 2, mz = (az + qz) / 2
+    wall(m, ax, az, bx, bz, y0, y1, mx, mz, color, material)
+    wall(m, bx, bz, qx, qz, y0, y1, mx, mz, color, material)
+    wall(m, qx, qz, dx, dz, y0, y1, mx, mz, color, material)
+    wall(m, dx, dz, ax, az, y0, y1, mx, mz, color, material)
+    upQuad(m, ax, az, bx, bz, qx, qz, dx, dz, y1, color, material)
+  }
+
+  private func sitter(_ m: MeshBuilder, _ x: Float, _ z: Float, _ seat: Float, _ shirt: Int) {
+    m.box(x - 0.17, seat, z - 0.11, x + 0.17, seat + 0.52, z + 0.11, shirt)
+    m.box(x - 0.16, seat - 0.02, z - 0.3, x + 0.16, seat + 0.12, z + 0.1, 0x2B2F3A)
+    m.ellipsoid(x, seat + 0.66, z, 0.11, 0.13, 0.12, 6, 4, 0x8C5A3C)
+    m.ellipsoid(x, seat + 0.72, z + 0.02, 0.115, 0.08, 0.12, 6, 3, 0x17181A)
+  }
+
+  private func stander(_ m: MeshBuilder, _ x: Float, _ z: Float, _ shirt: Int) {
+    m.box(x - 0.15, 0, z - 0.09, x + 0.15, 0.85, z + 0.09, 0x2B2F3A)
+    m.box(x - 0.19, 0.85, z - 0.12, x + 0.19, 1.45, z + 0.12, shirt)
+    m.ellipsoid(x, 1.6, z, 0.11, 0.13, 0.12, 6, 4, 0x8C5A3C)
+    m.ellipsoid(x, 1.66, z + 0.02, 0.115, 0.08, 0.12, 6, 3, 0x17181A)
+  }
+
+  /// A cha stall: counter, shelf of jars, kettle on the stove, blue tarp, bench and customers.
+  private func teaStall(_ cx: Float, _ cz: Float, _ fx: Float, _ fz: Float) {
+    let m = meshChunk(cx, cz, 4).detail
+    let rx = -fz, rz = fx
+    func px(_ u: Float, _ v: Float) -> Float { cx + rx * u + fx * v }
+    func pz(_ u: Float, _ v: Float) -> Float { cz + rz * u + fz * v }
+    let wood = 0x7A5230
+    obox(m, cx, cz, fx, fz, -0.9, 0.9, -0.35, 0.35, 0, 0.95, wood, Mat.PLAIN)
+    obox(m, cx, cz, fx, fz, -0.95, 0.95, -0.4, 0.4, 0.95, 1, 0x5A3A22, Mat.PLAIN)
+    obox(m, cx, cz, fx, fz, -0.9, 0.9, 0.4, 0.6, 0, 1.9, 0x6A4628, Mat.PLAIN)
+    for k in 0...3 { m.cylinder(px(-0.6 + Float(k) * 0.4, 0.15), 1, pz(-0.6 + Float(k) * 0.4, 0.15), 0.08, 1.28, 0.07, 6, 0xCFE3D8, Mat.GLASS) }
+    let sx = px(0.55, -0.15), sz = pz(0.55, -0.15)
+    m.box(sx - 0.15, 1, sz - 0.15, sx + 0.15, 1.12, sz + 0.15, 0x2A2C2E)
+    m.cylinder(sx, 1.12, sz, 0.13, 1.36, 0.09, 8, 0xA9B0B4, Mat.GLOSSY)
+    for u: Float in [-1.15, 1.15] {
+      for v: Float in [-1, 0.65] {
+        let x = px(u, v), z = pz(u, v)
+        m.box(x - 0.04, 0, z - 0.04, x + 0.04, v < 0 ? 2.1 : 2.38, z + 0.04, 0x4A4E52)
+      }
+    }
+    let ax = px(-1.3, -1.15), az = pz(-1.3, -1.15), bx = px(1.3, -1.15), bz = pz(1.3, -1.15)
+    let qx = px(1.3, 0.8), qz = pz(1.3, 0.8), dx = px(-1.3, 0.8), dz = pz(-1.3, 0.8)
+    m.quad(ax, 2.1, az, bx, 2.1, bz, qx, 2.4, qz, dx, 2.4, dz, 0x2D6EB0)
+    m.quad(ax, 2.09, az, dx, 2.39, dz, qx, 2.39, qz, bx, 2.09, bz, 0x245A92)
+    wall(m, px(-0.8, -1.17), pz(-0.8, -1.17), px(0.8, -1.17), pz(0.8, -1.17), 2.1, 2.4, cx, cz, 0xC8202A, Mat.PLAIN)
+    wall(m, px(-0.6, -1.18), pz(-0.6, -1.18), px(0.6, -1.18), pz(0.6, -1.18), 2.19, 2.31, cx, cz, 0xF4F2EA, Mat.PLAIN)
+    m.ellipsoid(px(-1, -1), 1.75, pz(-1, -1), 0.14, 0.22, 0.14, 6, 3, 0xE8C838)
+    m.ellipsoid(px(1, -1), 1.75, pz(1, -1), 0.14, 0.22, 0.14, 6, 3, 0xD8B830)
+    obox(m, cx, cz, fx, fz, -0.85, 0.85, -1.15, -0.85, 0.4, 0.47, wood, Mat.PLAIN)
+    sitter(m, px(-0.4, -1), pz(-0.4, -1), 0.47, 0xF2F0E8)
+    sitter(m, px(0.35, -1), pz(0.35, -1), 0.47, 0x2D5DA8)
+    sitter(m, px(-0.3, 0), pz(-0.3, 0), 1, 0xE8E2D2)
+  }
+
+  /// A fruit seller's cart under a big umbrella, piled with oranges, apples, bananas and guavas.
+  private func fruitCart(_ cx: Float, _ cz: Float, _ fx: Float, _ fz: Float) {
+    let m = meshChunk(cx, cz, 4).detail
+    let rx = -fz, rz = fx
+    func px(_ u: Float, _ v: Float) -> Float { cx + rx * u + fx * v }
+    func pz(_ u: Float, _ v: Float) -> Float { cz + rz * u + fz * v }
+    obox(m, cx, cz, fx, fz, -0.9, 0.9, -0.55, 0.55, 0.7, 0.8, 0x6A4628, Mat.PLAIN)
+    for u: Float in [-0.8, 0.8] {
+      for v: Float in [-0.45, 0.45] {
+        let x = px(u, v), z = pz(u, v)
+        m.box(x - 0.04, 0, z - 0.04, x + 0.04, 0.7, z + 0.04, 0x3A2A1A)
+      }
+    }
+    let first = Int(spotHash(cx, cz, 15) * 4)
+    for k in 0...5 {
+      let u = -0.6 + Float(k % 3) * 0.6, v: Float = k < 3 ? -0.25 : 0.25
+      m.ellipsoid(px(u, v), 0.9, pz(u, v), 0.27, 0.14, 0.22, 7, 3, fruitColors[(k + first) % 4])
+    }
+    let ux = px(0, 0), uz = pz(0, 0)
+    m.box(ux - 0.025, 0.8, uz - 0.025, ux + 0.025, 2.5, uz + 0.025, 0x5A5E60)
+    m.cylinder(ux, 2.1, uz, 1.35, 2.55, 0.05, 10, 0xD84A3A, cap: false)
+    stander(m, px(0.2, 0.9), pz(0.2, 0.9), 0xF2F0E8)
+  }
+
+  /// A cloth banner strung across the street from the pole at (x, z) to (x2, z2).
+  private func banner(_ m: MeshBuilder, _ x: Float, _ z: Float, _ x2: Float, _ z2: Float, _ dx: Float, _ dz: Float) {
+    thinLine(m, x, 6.3, z, x2, 6.3, z2)
+    let color = bannerColors[min(bannerColors.count - 1, Int(spotHash(x, z, 14) * Float(bannerColors.count)))]
+    let ax = x + (x2 - x) * 0.22, az = z + (z2 - z) * 0.22
+    let bx = x + (x2 - x) * 0.78, bz = z + (z2 - z) * 0.78
+    let mx = (ax + bx) / 2, mz = (az + bz) / 2
+    for side: Float in [1, -1] {
+      let o = 0.01 * side
+      wall(m, ax + dx * o, az + dz * o, bx + dx * o, bz + dz * o, 5.35, 6.28, mx - dx * side, mz - dz * side, color, Mat.PLAIN)
+      let o2 = 0.02 * side
+      let lx = ax + (bx - ax) * 0.12 + dx * o2, lz = az + (bz - az) * 0.12 + dz * o2
+      let rx = ax + (bx - ax) * 0.88 + dx * o2, rz = az + (bz - az) * 0.88 + dz * o2
+      wall(m, lx, lz, rx, rz, 5.66, 5.96, mx - dx * side, mz - dz * side, 0xF4F2EA, Mat.PLAIN)
+    }
+  }
+
+  /// A rooftop advertising hoarding on its steel frame, lit from above at night.
+  private func billboard(_ i: Int, _ top: Float, _ chunk: Chunk) {
+    let m = chunk.detail
+    let a = map.boxAngle[i]
+    var ux = cos(a), uz = sin(a), vx = -uz, vz = ux
+    var hu = map.boxHalfX[i], hv = map.boxHalfZ[i]
+    if hv > hu { let tx = ux, tz = uz; ux = vx; uz = vz; vx = -tx; vz = -tz; let t = hu; hu = hv; hv = t }
+    if hu < 4 { return }
+    let half = min(5, hu * 0.85)
+    let cx = map.boxX[i] + vx * hv * 0.7, cz = map.boxZ[i] + vz * hv * 0.7
+    let y0 = top + City.PARAPET + 1.3, y1 = y0 + 3.6
+    let x0 = cx - ux * half, z0 = cz - uz * half, x1 = cx + ux * half, z1 = cz + uz * half
+    for k in 0...3 {
+      let t = -half * 0.8 + Float(k) * (half * 1.6 / 3)
+      let px = cx + ux * t - vx * 0.35, pz = cz + uz * t - vz * 0.35
+      m.box(px - 0.08, top, pz - 0.08, px + 0.08, y1, pz + 0.08, 0x3A3D40)
+    }
+    let pick = min(5, Int(spotHash(cx, cz, 12) * 6)) * 3
+    let bg = adColors[pick], c1 = adColors[pick + 1], c2 = adColors[pick + 2]
+    wall(m, x0, z0, x1, z1, y0, y1, cx - vx, cz - vz, bg, Mat.PLAIN)
+    wall(m, x0 - vx * 0.15, z0 - vz * 0.15, x1 - vx * 0.15, z1 - vz * 0.15, y0, y1, cx + vx, cz + vz, 0x2A2C2E, Mat.PLAIN)
+    func layer(_ u0: Float, _ u1: Float, _ b: Float, _ t: Float, _ color: Int) {
+      wall(m, cx + ux * u0 + vx * 0.02, cz + uz * u0 + vz * 0.02, cx + ux * u1 + vx * 0.02, cz + uz * u1 + vz * 0.02, y0 + b, y0 + t, cx - vx, cz - vz, color, Mat.PLAIN)
+    }
+    layer(-half * 0.94, -half * 0.12, 0.25, 3.35, c1)
+    layer(-half * 0.02, half * 0.9, 2.3, 2.85, c2)
+    layer(-half * 0.02, half * 0.75, 1.5, 1.85, c2)
+    layer(-half * 0.02, half * 0.55, 0.75, 1.05, c1)
+    wall(m, x0 + vx * 0.5, z0 + vz * 0.5, x1 + vx * 0.5, z1 + vz * 0.5, y1 + 0.05, y1 + 0.14, cx - vx, cz - vz, 0xFFF2D0, Mat.LAMP)
+    solid(cx, cz, atan2(uz, ux), half, 0.4, top, y1 + 0.2)
+  }
+
+  /// A sodium lamp on an arm reaching over the road from a pole at (x, z); (dx, dz) points at the road.
+  private func streetLamp(_ m: MeshBuilder, _ c: Chunk, _ x: Float, _ z: Float, _ dx: Float, _ dz: Float) {
+    let hx = x + dx * 1.7, hz = z + dz * 1.7
+    m.box(min(x, hx) - 0.05, 7.05, min(z, hz) - 0.05, max(x, hx) + 0.05, 7.15, max(z, hz) + 0.05, 0x5B5E60)
+    m.box(hx - 0.28, 6.9, hz - 0.28, hx + 0.28, 7.08, hz + 0.28, 0x45484A)
+    m.box(hx - 0.22, 6.86, hz - 0.22, hx + 0.22, 6.9, hz + 0.22, 0xFFC27A, Mat.LAMP)
+    let r: Float = 7.5, y = C.ROAD_Y + 0.012
+    for i in 0..<10 {
+      let a = Float(i) * 2 * PI_F / 10, b = Float(i + 1) * 2 * PI_F / 10
+      c.glow.shadeQuad(hx, y, hz, hx + cos(a) * r, y, hz + sin(a) * r, hx + cos(b) * r, y, hz + sin(b) * r, hx, y, hz, 0, 1, 1, 0)
     }
   }
 
@@ -427,6 +787,10 @@ final class City {
       let ax = -uz * 0.9, az = ux * 0.9
       m.box(min(x - ax, x + ax) - 0.05, 8.2, min(z - az, z + az) - 0.05, max(x - ax, x + ax) + 0.05, 8.32, max(z - az, z + az) + 0.05, 0x5B5E60)
       solid(x, z, 0, 0.15, 0.15, 0, 9, false)
+      streetLamp(m, meshChunk(x, z, 10), x, z, -point[3], point[2])
+      if k > 0 && (3...5).contains(map.edgeClass[e]) && spotHash(x, z, 13) < 0.35 {
+        banner(m, x, z, point[0] - point[3] * side, point[1] + point[2] * side, point[2], point[3])
+      }
       if k > 0 {
         for strand in 0...2 {
           let o = (Float(strand) - 1) * 0.5
@@ -564,19 +928,73 @@ final class City {
         wall(m, ax, az, bx, bz, 0, top, cx, cz, color, facade)
       }
     }
+    contactShade(from, n, cx, cz, chunk.shade)
     let shed = kind == MapData.SHED
+    let walled = !shed && kind != MapData.TOWER && kind != MapData.MALL
+    if walled { relief(i, from, n, top, shopHeight, color, chunk) }
     flat(m, map.buildingX, map.buildingZ, from, to, top, shed ? (tintRoll % 3 == 0 ? 0x5E7C9A : 0x9A6B4F) : 0xD9D6CF, Mat.of(shed ? .metal : .roof))
-    solid(cx, cz, map.boxAngle[i], map.boxHalfX[i], map.boxHalfZ[i], 0, top + 0.3)
+    solid(cx, cz, map.boxAngle[i], map.boxHalfX[i], map.boxHalfZ[i], 0, top + (walled ? City.PARAPET : 0.3))
 
-    if shopHeight > 0 { signboards(from, n, cx, cz) }
+    if shopHeight > 0 { signboards(from, n, cx, cz, top) }
     switch kind {
     case MapData.APARTMENT, MapData.HOUSE, MapData.COMMERCIAL, MapData.EDUCATION, MapData.HOSPITAL: rooftop(i, top, chunk)
     case MapData.MOSQUE: mosque(i, top, chunk)
     default: break
     }
+    if (kind == MapData.APARTMENT || kind == MapData.COMMERCIAL) && floors >= 6 && spotHash(cx, cz, 11) < 0.15 { billboard(i, top, chunk) }
+  }
+  /// Ambient occlusion on the ground around a building's footprint, darkest against the wall.
+  private func contactShade(_ from: Int, _ n: Int, _ cx: Float, _ cz: Float, _ m: MeshBuilder) {
+    let y: Float = 0.05, w: Float = 1.7
+    for k in 0..<n {
+      let a = from + k, b = from + (k + 1) % n
+      let ax = map.buildingX[a], az = map.buildingZ[a], bx = map.buildingX[b], bz = map.buildingZ[b]
+      let length = hypotf(bx - ax, bz - az)
+      if length < 0.8 { continue }
+      var nx = -(bz - az) / length, nz = (bx - ax) / length
+      if nx * ((ax + bx) / 2 - cx) + nz * ((az + bz) / 2 - cz) < 0 { nx = -nx; nz = -nz }
+      m.shadeQuad(ax, y, az, bx, y, bz, bx + nx * w, y, bz + nz * w, ax + nx * w, y, az + nz * w, 0.5, 0.5, 1, 1)
+    }
   }
 
-  private func signboards(_ from: Int, _ n: Int, _ cx: Float, _ cz: Float) {
+  /// A parapet wall around the roof and a concrete sunshade (chajja) over the windows of every
+  /// floor, lined up with the floors painted in the facade texture (City.kt relief).
+  private func relief(_ i: Int, _ from: Int, _ n: Int, _ top: Float, _ shopHeight: Float, _ color: Int, _ chunk: Chunk) {
+    let cx = map.boxX[i], cz = map.boxZ[i]
+    let trim = Mat.of(.concrete)
+    let parapet = City.PARAPET
+    let ledges = (3...16).contains(map.floors[i])
+    for k in 0..<n {
+      let a = from + k, b = from + (k + 1) % n
+      let ax = map.buildingX[a], az = map.buildingZ[a], bx = map.buildingX[b], bz = map.buildingZ[b]
+      let length = hypotf(bx - ax, bz - az)
+      if length < 0.5 { continue }
+      let ux = (bx - ax) / length, uz = (bz - az) / length
+      var nx = -uz, nz = ux
+      if nx * ((ax + bx) / 2 - cx) + nz * ((az + bz) / 2 - cz) < 0 { nx = -nx; nz = -nz }
+
+      wall(chunk.mesh, ax, az, bx, bz, top, top + parapet, cx, cz, color, trim)
+      if length < 1.2 { continue }
+      let t: Float = 0.2
+      let ix0 = ax - nx * t + ux * t, iz0 = az - nz * t + uz * t
+      let ix1 = bx - nx * t - ux * t, iz1 = bz - nz * t - uz * t
+      wall(chunk.detail, ix0, iz0, ix1, iz1, top, top + parapet, ix0 + nx * 50, iz0 + nz * 50, color, trim)
+      upQuad(chunk.detail, ax, az, bx, bz, ix1, iz1, ix0, iz0, top + parapet, color, trim)
+
+      if !ledges || length < 6 { continue }
+      let d: Float = 0.5
+      let x0 = ax, z0 = az, x1 = bx, z1 = bz
+      let ox0 = x0 + nx * d, oz0 = z0 + nz * d, ox1 = x1 + nx * d, oz1 = z1 + nz * d
+      var y = City.CURB + 2.72
+      while y + 0.6 < top {
+        if y > shopHeight + 0.2 { upQuad(chunk.detail, x0, z0, x1, z1, ox1, oz1, ox0, oz0, y, color, Mat.LEDGE) }
+        y += 3.3
+      }
+    }
+  }
+
+
+  private func signboards(_ from: Int, _ n: Int, _ cx: Float, _ cz: Float, _ top: Float) {
     let m = meshChunk(cx, cz, 30).detail
     var first = -1, second = -1
     var firstLength: Float = 0, secondLength: Float = 0
@@ -602,6 +1020,26 @@ final class City {
       let lx0 = x0 + (x1 - x0) * 0.1 + nx * 0.01, lz0 = z0 + (z1 - z0) * 0.1 + nz * 0.01
       let lx1 = x0 + (x1 - x0) * 0.9 + nx * 0.01, lz1 = z0 + (z1 - z0) * 0.9 + nz * 0.01
       wall(m, lx0, lz0, lx1, lz1, y0 + 0.28, y0 + 0.47, lx0 - nx, lz0 - nz, 0xF4F2EA, Mat.PLAIN)
+      if k == first && length > 8 { bladeSigns(m, ax, az, bx, bz, nx, nz, length, top) }
+    }
+  }
+
+  /// Signs that stick out from the wall above the shops, readable from along the street.
+  private func bladeSigns(_ m: MeshBuilder, _ ax: Float, _ az: Float, _ bx: Float, _ bz: Float, _ nx: Float, _ nz: Float, _ length: Float, _ top: Float) {
+    let ux = (bx - ax) / length, uz = (bz - az) / length
+    let y1 = min(6.4, top - 0.4)
+    if y1 < 4.6 { return }
+    for f: Float in [0.2, 0.72] {
+      let x0 = ax + (bx - ax) * f + nx * 0.12, z0 = az + (bz - az) * f + nz * 0.12
+      let x1 = x0 + nx * 0.95, z1 = z0 + nz * 0.95
+      let color = signColors[min(signColors.count - 1, Int(spotHash(x0, z0, 17) * Float(signColors.count)))]
+      wall(m, x0, z0, x1, z1, 3.7, y1, x0 - ux, z0 - uz, color, Mat.PLAIN)
+      wall(m, x0, z0, x1, z1, 3.7, y1, x0 + ux, z0 + uz, color, Mat.PLAIN)
+      for s: Float in [1, -1] {
+        let o = 0.012 * s
+        wall(m, x0 + nx * 0.15 + ux * o, z0 + nz * 0.15 + uz * o, x0 + nx * 0.8 + ux * o, z0 + nz * 0.8 + uz * o,
+             3.9, y1 - 0.25, x0 - ux * s, z0 - uz * s, 0xF4F2EA, Mat.PLAIN)
+      }
     }
   }
 

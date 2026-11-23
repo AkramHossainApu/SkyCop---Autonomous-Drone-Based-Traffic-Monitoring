@@ -10,6 +10,7 @@ internal class WorldRenderer(private var city: City, gpu: GpuProfile) {
         const val SHADOW_HALF = 85f
         const val NEAR = 0.15f
         const val FAR = 1400f
+        const val RAIN_STREAKS = 2600
     }
 
     private val shadowSize = gpu.shadowSize
@@ -27,6 +28,7 @@ internal class WorldRenderer(private var city: City, gpu: GpuProfile) {
     private val worldReliefOn = world.uniform("uReliefOn")
     private val worldShadowTexel = world.uniform("uShadowTexel")
     private val worldShadowMap = world.uniform("uShadowMap")
+    private val worldEnv = intArrayOf(world.uniform("uSun"), world.uniform("uSunColor"), world.uniform("uSkyTop"), world.uniform("uSkyLow"))
 
     private val depth = Program(Shaders.SHADOW_VERTEX, Shaders.SHADOW_FRAGMENT)
     private val depthMatrix = depth.uniform("uViewProjection")
@@ -36,6 +38,29 @@ internal class WorldRenderer(private var city: City, gpu: GpuProfile) {
     private val skyBasis = sky.uniform("uBasis")
     private val skyTan = sky.uniform("uTan")
     private val skyTime = sky.uniform("uTime")
+    private val skyEnv = intArrayOf(sky.uniform("uSun"), sky.uniform("uSunColor"), sky.uniform("uSkyTop"), sky.uniform("uSkyLow"))
+
+    private val shade = Program(Shaders.SHADE_VERTEX, Shaders.SHADE_FRAGMENT)
+    private val shadeMatrix = shade.uniform("uViewProjection")
+    private val shadeEye = shade.uniform("uEye")
+    private val shadeFog = shade.uniform("uFog")
+
+    private val pool = Program(Shaders.SHADE_VERTEX, Shaders.POOL_FRAGMENT)
+    private val poolMatrix = pool.uniform("uViewProjection")
+    private val poolEye = pool.uniform("uEye")
+    private val poolFog = pool.uniform("uFog")
+    private val poolTint = pool.uniform("uTint")
+
+    private val rainProgram = Program(Shaders.RAIN_VERTEX, Shaders.RAIN_FRAGMENT)
+    private val rainMatrix = rainProgram.uniform("uViewProjection")
+    private val rainEye = rainProgram.uniform("uEye")
+    private val rainRight = rainProgram.uniform("uRight")
+    private val rainTime = rainProgram.uniform("uTime")
+    private val rainColor = rainProgram.uniform("uRainColor")
+    private val rainVao: Int
+    private val rainVertices = RAIN_STREAKS * 6
+    /** sun xyz + night, light color + wet, sky top + fog, sky low + rain. */
+    private val env = FloatArray(16)
 
     private val glow = Program(Shaders.GLOW_VERTEX, Shaders.GLOW_FRAGMENT)
     private val glowMatrix = glow.uniform("uViewProjection")
@@ -45,6 +70,9 @@ internal class WorldRenderer(private var city: City, gpu: GpuProfile) {
     private var terrain = GpuMesh(city.terrain)
     private var blocks = Array(city.chunks.size) { GpuMesh(city.chunks[it].mesh) }
     private var details = Array(city.chunks.size) { GpuMesh(city.chunks[it].detail) }
+    private var shades = Array(city.chunks.size) { GpuMesh(city.chunks[it].shade) }
+    private var pools = Array(city.chunks.size) { GpuMesh(city.chunks[it].glow) }
+    private val walkers = Models.walkers().map { GpuMesh(it, Pedestrians.MAX) }.toTypedArray()
     private val droneBody = GpuMesh(Models.drone())
     private val propeller = GpuMesh(Models.propeller())
     private val rotorDisc = GpuMesh(Models.rotorDisc())
@@ -97,9 +125,30 @@ internal class WorldRenderer(private var city: City, gpu: GpuProfile) {
         glDrawBuffers(1, none, 0)
         glReadBuffer(GL_NONE)
 
-        // Same direction as SUN in the shaders.
-        val length = sqrt(0.45f * 0.45f + 0.78f * 0.78f + 0.38f * 0.38f)
-        val bx = 0.45f / length; val by = 0.78f / length; val bz = 0.38f / length
+        setLight(0.52f, 0.6f, 0.46f)
+
+        // Rain streaks scattered through a 50 m box; the vertex shader makes them fall and wrap.
+        val streaks = directFloats(rainVertices * 4)
+        val random = java.util.Random(7)
+        for (i in 0 until RAIN_STREAKS) {
+            val x = random.nextFloat() * 50f - 25f; val y = random.nextFloat() * 50f - 25f; val z = random.nextFloat() * 50f - 25f
+            for (corner in intArrayOf(0, 1, 2, 0, 2, 3)) { streaks.put(x); streaks.put(y); streaks.put(z); streaks.put(corner.toFloat()) }
+        }
+        streaks.position(0)
+        glGenVertexArrays(1, id, 0)
+        rainVao = id[0]
+        glBindVertexArray(rainVao)
+        glGenBuffers(1, id, 0)
+        glBindBuffer(GL_ARRAY_BUFFER, id[0])
+        glBufferData(GL_ARRAY_BUFFER, rainVertices * 16, streaks, GL_STATIC_DRAW)
+        glEnableVertexAttribArray(0); glVertexAttribPointer(0, 4, GL_FLOAT, false, 16, 0)
+        glBindVertexArray(0)
+    }
+
+    /** Points the shadow map's view along the light: the sun by day, the moon at night. */
+    private fun setLight(x: Float, y: Float, z: Float) {
+        val length = sqrt(x * x + y * y + z * z)
+        val bx = x / length; val by = y / length; val bz = z / length
         val h = hypot(bx, bz)
         val rx = bz / h; val rz = -bx / h
         lightBasis[0] = rx; lightBasis[2] = rz
@@ -107,21 +156,35 @@ internal class WorldRenderer(private var city: City, gpu: GpuProfile) {
         lightBasis[8] = bx; lightBasis[9] = by; lightBasis[10] = bz
     }
 
+    private fun setEnvironment(locations: IntArray) {
+        for (k in 0..3) glUniform4f(locations[k], env[k * 4], env[k * 4 + 1], env[k * 4 + 2], env[k * 4 + 3])
+    }
+
     /** Swaps in another map's city, freeing the old one's meshes. Shaders and textures stay. */
     fun load(next: City) {
         terrain.release()
         for (mesh in blocks) mesh.release()
         for (mesh in details) mesh.release()
+        for (mesh in shades) mesh.release()
+        for (mesh in pools) mesh.release()
         city = next
         terrain = GpuMesh(next.terrain)
         blocks = Array(next.chunks.size) { GpuMesh(next.chunks[it].mesh) }
         details = Array(next.chunks.size) { GpuMesh(next.chunks[it].detail) }
+        shades = Array(next.chunks.size) { GpuMesh(next.chunks[it].shade) }
+        pools = Array(next.chunks.size) { GpuMesh(next.chunks[it].glow) }
     }
 
     /** Uploads what moves and renders the shadow map. Called once per frame. */
     fun prepare(game: Game, level: QualityLevel) {
         quality = level
         time = game.clock % 3600f
+        val e = game.environment
+        env[0] = e.light[0]; env[1] = e.light[1]; env[2] = e.light[2]; env[3] = e.night
+        env[4] = e.lightColor[0]; env[5] = e.lightColor[1]; env[6] = e.lightColor[2]; env[7] = e.wet
+        env[8] = e.skyTop[0]; env[9] = e.skyTop[1]; env[10] = e.skyTop[2]; env[11] = e.fog
+        env[12] = e.skyLow[0]; env[13] = e.skyLow[1]; env[14] = e.skyLow[2]; env[15] = e.rain
+        setLight(e.light[0], e.light[1], e.light[2])
         signalTime = game.traffic.time % Signals.CYCLE
         showShadows = game.settings.shadows && level.shadows
         val pose = game.drone.render
@@ -150,6 +213,16 @@ internal class WorldRenderer(private var city: City, gpu: GpuProfile) {
             vehicles[traffic.type[car]].addInstance(x, traffic.y[car], z, traffic.yaw[car], color)
         }
         for (mesh in vehicles) mesh.uploadInstances()
+
+        for (mesh in walkers) mesh.beginInstances()
+        val people = game.pedestrians
+        val walkRange = min(110f, level.carRange * 0.5f)
+        for (p in 0 until people.count) {
+            val dx = people.x[p] - eye[0]; val dz = people.z[p] - eye[2]
+            if (abs(dx) > walkRange || abs(dz) > walkRange) continue
+            walkers[if (people.stride[p] < 1f) 0 else 1].addInstance(people.x[p], City.CURB, people.z[p], people.yaw[p], people.color[p])
+        }
+        for (mesh in walkers) mesh.uploadInstances()
 
         if (showShadows) renderShadowMap(pose)
     }
@@ -187,6 +260,7 @@ internal class WorldRenderer(private var city: City, gpu: GpuProfile) {
             if (hypot(city.chunks[i].x - pose.x, city.chunks[i].z - pose.z) < quality.shadowDetailRange) details[i].draw()
         }
         for (mesh in vehicles) mesh.draw()
+        for (mesh in walkers) mesh.draw()
         glUniformMatrix4fv(depthModel, 1, false, droneMatrix, 0)
         droneBody.draw()
         glDisable(GL_POLYGON_OFFSET_FILL)
@@ -220,6 +294,7 @@ internal class WorldRenderer(private var city: City, gpu: GpuProfile) {
         glBindTexture(GL_TEXTURE_2D_ARRAY, atlas.relief)
         glUniform1i(worldRelief, 3)
         glUniform1f(worldReliefOn, if (quality.relief) 1f else 0f)
+        setEnvironment(worldEnv)
 
         // Nearest first, so hidden fragments are rejected before the expensive shader runs.
         if (showDrone) {
@@ -244,18 +319,61 @@ internal class WorldRenderer(private var city: City, gpu: GpuProfile) {
             }
         }
         for (mesh in vehicles) mesh.draw()
+        for (mesh in walkers) mesh.draw()
         terrain.draw()
+
+        // Contact shadows and grime, multiplied over the ground and roads already drawn.
+        shade.use()
+        glUniformMatrix4fv(shadeMatrix, 1, false, viewProjection, 0)
+        glUniform3f(shadeEye, x, y, z)
+        glUniform1f(shadeFog, env[11])
+        glDepthMask(false)
+        glDisable(GL_CULL_FACE)
+        glEnable(GL_BLEND); glBlendFunc(GL_DST_COLOR, GL_ZERO)
+        glEnable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(-1f, -2f)
+        for (i in shades.indices) {
+            val chunk = city.chunks[i]
+            if (hypot(chunk.x - x, chunk.z - z) < quality.detailRange + 160f && visible(chunk)) shades[i].draw()
+        }
+        // At night, warm pools of light under the street lamps.
+        if (env[3] > 0.05f) {
+            pool.use()
+            glUniformMatrix4fv(poolMatrix, 1, false, viewProjection, 0)
+            glUniform3f(poolEye, x, y, z)
+            glUniform1f(poolFog, env[11])
+            glUniform3f(poolTint, 0.55f * env[3], 0.34f * env[3], 0.14f * env[3])
+            glBlendFunc(GL_ONE, GL_ONE)
+            for (i in pools.indices) {
+                val chunk = city.chunks[i]
+                if (hypot(chunk.x - x, chunk.z - z) < 320f && visible(chunk)) pools[i].draw()
+            }
+        }
+        glDisable(GL_POLYGON_OFFSET_FILL)
+        glDisable(GL_BLEND)
+        glEnable(GL_CULL_FACE)
 
         sky.use()
         glUniformMatrix4fv(skyBasis, 1, false, basis, 0)
         glUniform2f(skyTan, tanHalfY * aspect, tanHalfY)
         glUniform1f(skyTime, time)
+        setEnvironment(skyEnv)
         glDepthMask(false)
         glBindVertexArray(emptyVao)
         glDrawArrays(GL_TRIANGLES, 0, 3)
 
         glEnable(GL_BLEND); glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         glDisable(GL_CULL_FACE)
+        if (env[15] > 0.02f) {
+            rainProgram.use()
+            glUniformMatrix4fv(rainMatrix, 1, false, viewProjection, 0)
+            glUniform3f(rainEye, x, y, z)
+            glUniform3f(rainRight, basis[0], basis[1], basis[2])
+            glUniform1f(rainTime, time)
+            val bright = 0.55f + 0.35f * (1f - env[3])
+            glUniform4f(rainColor, env[12] * bright + 0.25f, env[13] * bright + 0.25f, env[14] * bright + 0.27f, 0.32f * env[15])
+            glBindVertexArray(rainVao)
+            glDrawArrays(GL_TRIANGLES, 0, rainVertices)
+        }
         glow.use()
         glUniformMatrix4fv(glowMatrix, 1, false, viewProjection, 0)
         if (showDrone && rotor > 0.1f) {

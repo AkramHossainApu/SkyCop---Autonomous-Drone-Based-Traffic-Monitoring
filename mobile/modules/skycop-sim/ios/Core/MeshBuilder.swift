@@ -3,6 +3,14 @@ import Foundation
 /** Material ids travel in the alpha byte of each vertex color (see MeshBuilder.kt). */
 enum Mat {
   static let PLAIN = 0, GLOSSY = 1, GLASS = 2, GROUND = 3, EMISSIVE = 4, TINT = 5, WATER = 6, STROBE = 7
+  /// Textured concrete that casts no shadow-map shadow (see MeshBuilder.kt).
+  static let LEDGE = 8
+  /// Painted curb stones: the vertex color alternating with black in blocks along the ground.
+  static let STRIPED = 9
+  /// Head, tail and street lamps: dim by day, glowing at night.
+  static let LAMP = 22
+  /// A window whose room lights up at night.
+  static let NIGHT_WINDOW = 23
   static let SIGNAL = 10
   static let TEXTURED = 32
   static func of(_ tex: Tex) -> Int { TEXTURED + tex.rawValue }
@@ -52,6 +60,20 @@ final class MeshBuilder {
     vertex(ax, ay, az, normal, packed)
     vertex(bx, by, bz, normal, packed)
     vertex(cx, cy, cz, normal, packed)
+  }
+
+  /// A soft shadow decal for the shade pass, multiplied over what is drawn: 0 is black, 1 leaves it as it is.
+  func shadeQuad(_ ax: Float, _ ay: Float, _ az: Float, _ bx: Float, _ by: Float, _ bz: Float,
+                 _ cx: Float, _ cy: Float, _ cz: Float, _ dx: Float, _ dy: Float, _ dz: Float,
+                 _ ka: Float, _ kb: Float, _ kc: Float, _ kd: Float) {
+    let up = MeshBuilder.packNormal(0, 1, 0, 4)
+    vertex(ax, ay, az, up, MeshBuilder.gray(ka)); vertex(bx, by, bz, up, MeshBuilder.gray(kb)); vertex(cx, cy, cz, up, MeshBuilder.gray(kc))
+    vertex(ax, ay, az, up, MeshBuilder.gray(ka)); vertex(cx, cy, cz, up, MeshBuilder.gray(kc)); vertex(dx, dy, dz, up, MeshBuilder.gray(kd))
+  }
+
+  private static func gray(_ k: Float) -> UInt32 {
+    let v = UInt32(Int(min(max(k, 0), 1) * 255 + 0.5))
+    return v | (v << 8) | (v << 16)
   }
 
   func quad(_ ax: Float, _ ay: Float, _ az: Float, _ bx: Float, _ by: Float, _ bz: Float,

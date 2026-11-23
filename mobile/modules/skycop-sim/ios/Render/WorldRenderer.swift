@@ -16,6 +16,22 @@ struct FrameUniforms {
   var eye: SIMD4<Float>
   var params: SIMD4<Float>
   var params2: SIMD4<Float>
+  var env: EnvUniforms
+}
+
+/// Environment.kt values for the shaders: light + night, light color + wet, sky top + fog, sky low + rain.
+struct EnvUniforms {
+  var sun = SIMD4<Float>(0.566692, 0.653876, 0.501305, 0)
+  var sunColor = SIMD4<Float>(3.1, 2.8, 2.3, 0)
+  var skyTop = SIMD4<Float>(0.33, 0.52, 0.76, 0.0021)
+  var skyLow = SIMD4<Float>(0.8, 0.8, 0.77, 0)
+}
+
+struct RainUniforms {
+  var viewProjection: simd_float4x4
+  var eyeTime: SIMD4<Float>
+  var right: SIMD4<Float>
+  var color: SIMD4<Float>
 }
 
 /// A static mesh, optionally drawn many times from a per-frame instance buffer.
@@ -77,6 +93,14 @@ final class WorldRenderer {
   private let shadowPipeline: MTLRenderPipelineState
   private let skyPipeline: MTLRenderPipelineState
   private let glowPipeline: MTLRenderPipelineState
+  private let shadePipeline: MTLRenderPipelineState
+  private let rainPipeline: MTLRenderPipelineState
+  private let poolPipeline: MTLRenderPipelineState
+  private var pools: [GpuMesh]
+  private let walkers: [GpuMesh]
+  private let rainBuffer: MTLBuffer
+  private static let RAIN_STREAKS = 2600
+  private var env = EnvUniforms()
   private let depthWrite: MTLDepthStencilState
   private let depthRead: MTLDepthStencilState
   private let linear: MTLSamplerState
@@ -89,6 +113,7 @@ final class WorldRenderer {
   private var terrain: GpuMesh
   private var blocks: [GpuMesh]
   private var details: [GpuMesh]
+  private var shades: [GpuMesh]
   private let droneBody: GpuMesh
   private let propeller: GpuMesh
   private let rotorDisc: GpuMesh
@@ -148,6 +173,44 @@ final class WorldRenderer {
     shadowPipeline = try pipeline("shadowVertex", nil, color: false, samples: 1, descriptor: vertexDescriptor)
     skyPipeline = try pipeline("fullscreenVertex", "skyFragment", color: true, samples: samples)
     glowPipeline = try pipeline("glowVertex", "glowFragment", color: true, blend: true, samples: samples, descriptor: vertexDescriptor)
+    let multiply = MTLRenderPipelineDescriptor()
+    multiply.vertexFunction = library.makeFunction(name: "shadeVertex")
+    multiply.fragmentFunction = library.makeFunction(name: "shadeFragment")
+    multiply.vertexDescriptor = vertexDescriptor
+    multiply.rasterSampleCount = samples
+    multiply.colorAttachments[0].pixelFormat = colorFormat
+    multiply.colorAttachments[0].isBlendingEnabled = true
+    multiply.colorAttachments[0].sourceRGBBlendFactor = .destinationColor
+    multiply.colorAttachments[0].destinationRGBBlendFactor = .zero
+    multiply.colorAttachments[0].sourceAlphaBlendFactor = .zero
+    multiply.colorAttachments[0].destinationAlphaBlendFactor = .one
+    multiply.depthAttachmentPixelFormat = .depth32Float
+    shadePipeline = try device.makeRenderPipelineState(descriptor: multiply)
+    multiply.fragmentFunction = library.makeFunction(name: "poolFragment")
+    multiply.colorAttachments[0].sourceRGBBlendFactor = .one
+    multiply.colorAttachments[0].destinationRGBBlendFactor = .one
+    poolPipeline = try device.makeRenderPipelineState(descriptor: multiply)
+    let rain = MTLRenderPipelineDescriptor()
+    rain.vertexFunction = library.makeFunction(name: "rainVertex")
+    rain.fragmentFunction = library.makeFunction(name: "rainFragment")
+    rain.rasterSampleCount = samples
+    rain.colorAttachments[0].pixelFormat = colorFormat
+    rain.colorAttachments[0].isBlendingEnabled = true
+    rain.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+    rain.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+    rain.colorAttachments[0].sourceAlphaBlendFactor = .one
+    rain.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
+    rain.depthAttachmentPixelFormat = .depth32Float
+    rainPipeline = try device.makeRenderPipelineState(descriptor: rain)
+    var streaks = [Float]()
+    streaks.reserveCapacity(WorldRenderer.RAIN_STREAKS * 24)
+    var seed: UInt64 = 7
+    func next() -> Float { seed = seed &* 6364136223846793005 &+ 1442695040888963407; return Float(seed >> 40) / Float(1 << 24) }
+    for _ in 0..<WorldRenderer.RAIN_STREAKS {
+      let x = next() * 50 - 25, y = next() * 50 - 25, z = next() * 50 - 25
+      for corner: Float in [0, 1, 2, 0, 2, 3] { streaks += [x, y, z, corner] }
+    }
+    rainBuffer = device.makeBuffer(bytes: streaks, length: streaks.count * 4, options: .storageModeShared)!
 
     let write = MTLDepthStencilDescriptor()
     write.depthCompareFunction = .lessEqual; write.isDepthWriteEnabled = true
@@ -207,14 +270,21 @@ final class WorldRenderer {
     terrain = GpuMesh(device, city.terrain)
     blocks = city.chunks.map { GpuMesh(device, $0.mesh) }
     details = city.chunks.map { GpuMesh(device, $0.detail) }
+    shades = city.chunks.map { GpuMesh(device, $0.shade) }
+    pools = city.chunks.map { GpuMesh(device, $0.glow) }
+    walkers = Models.walkers().map { GpuMesh(device, $0, maxInstances: Pedestrians.MAX) }
     droneBody = GpuMesh(device, Models.drone())
     propeller = GpuMesh(device, Models.propeller())
     rotorDisc = GpuMesh(device, Models.rotorDisc())
     vehicles = Models.vehicles().map { GpuMesh(device, $0, maxInstances: Traffic.MAX_VEHICLES) }
 
-    // Same direction as SUN in the shaders.
-    let length = sqrt(Float(0.45 * 0.45 + 0.78 * 0.78 + 0.38 * 0.38))
-    let bx: Float = 0.45 / length, by: Float = 0.78 / length, bz: Float = 0.38 / length
+    setLight(0.52, 0.6, 0.46)
+  }
+
+  /// Points the shadow map's view along the light: the sun by day, the moon at night.
+  private func setLight(_ x: Float, _ y: Float, _ z: Float) {
+    let length = sqrt(x * x + y * y + z * z)
+    let bx = x / length, by = y / length, bz = z / length
     let h = hypot(bx, bz)
     let rx = bz / h, rz = -bx / h
     lightBasis[0] = rx; lightBasis[2] = rz
@@ -225,6 +295,12 @@ final class WorldRenderer {
   func prepare(_ game: Game, _ level: QualityLevel, _ frame: Int, _ commands: MTLCommandBuffer) {
     quality = level
     time = fmodf(game.clock, 3600)
+    let e = game.environment
+    env.sun = SIMD4(e.light[0], e.light[1], e.light[2], e.night)
+    env.sunColor = SIMD4(e.lightColor[0], e.lightColor[1], e.lightColor[2], e.wet)
+    env.skyTop = SIMD4(e.skyTop[0], e.skyTop[1], e.skyTop[2], e.fog)
+    env.skyLow = SIMD4(e.skyLow[0], e.skyLow[1], e.skyLow[2], e.rain)
+    setLight(e.light[0], e.light[1], e.light[2])
     signalTime = fmodf(game.traffic.time, Signals.CYCLE)
     showShadows = game.settings.shadows && level.shadows
     let pose = game.drone.render
@@ -249,6 +325,14 @@ final class WorldRenderer {
       if abs(dx) > level.carRange || abs(dz) > level.carRange { continue }
       if abs(dx) + abs(dz) > 70 && -(dx * b[8] + dz * b[10]) < -30 && abs(b[9]) < 0.45 { continue }
       vehicles[traffic.type[car]].addInstance(x, traffic.y[car], z, traffic.yaw[car], traffic.color[car])
+    }
+    for mesh in walkers { mesh.beginInstances(frame) }
+    let people = game.pedestrians
+    let walkRange = min(110, level.carRange * 0.5)
+    for p in 0..<people.count {
+      let dx = people.x[p] - eye[0], dz = people.z[p] - eye[2]
+      if abs(dx) > walkRange || abs(dz) > walkRange { continue }
+      walkers[people.stride[p] < 1 ? 0 : 1].addInstance(people.x[p], City.CURB, people.z[p], people.yaw[p], people.color[p])
     }
     if showShadows { renderShadowMap(pose, commands) }
   }
@@ -280,7 +364,7 @@ final class WorldRenderer {
     encoder.setDepthStencilState(depthWrite)
     encoder.setCullMode(.none)
     encoder.setDepthBias(0.0008, slopeScale: 2.5, clamp: 0.01)
-    var uniforms = FrameUniforms(viewProjection: lightMetal, light: lightMetal, eye: .zero, params: .zero, params2: .zero)
+    var uniforms = FrameUniforms(viewProjection: lightMetal, light: lightMetal, eye: .zero, params: .zero, params2: .zero, env: env)
     encoder.setVertexBytes(&uniforms, length: MemoryLayout<FrameUniforms>.stride, index: 2)
     setModel(encoder, identity)
     extractPlanes(light)
@@ -289,6 +373,7 @@ final class WorldRenderer {
       if hypot(city.chunks[i].x - pose.x, city.chunks[i].z - pose.z) < quality.shadowDetailRange { details[i].draw(encoder, single: single) }
     }
     for mesh in vehicles { mesh.draw(encoder, single: single) }
+    for mesh in walkers { mesh.draw(encoder, single: single) }
     setModel(encoder, droneMatrix)
     droneBody.draw(encoder, single: single)
     encoder.endEncoding()
@@ -307,7 +392,7 @@ final class WorldRenderer {
     var uniforms = FrameUniforms(
       viewProjection: clipFix * matrix(viewProjection), light: lightMetal, eye: SIMD4(x, y, z, 1),
       params: SIMD4(time, signalTime, showShadows ? 1 : 0, 1 / Float(WorldRenderer.SHADOW_SIZE)),
-      params2: SIMD4(quality.relief ? 1 : 0, 0, 0, 0))
+      params2: SIMD4(quality.relief ? 1 : 0, 0, 0, 0), env: env)
     encoder.setVertexBytes(&uniforms, length: MemoryLayout<FrameUniforms>.stride, index: 2)
     encoder.setFragmentBytes(&uniforms, length: MemoryLayout<FrameUniforms>.stride, index: 2)
     encoder.setFragmentTexture(albedo, index: 0)
@@ -335,13 +420,49 @@ final class WorldRenderer {
       }
     }
     for mesh in vehicles { mesh.draw(encoder, single: single) }
+    for mesh in walkers { mesh.draw(encoder, single: single) }
     terrain.draw(encoder, single: single)
+
+    // Contact shadows and grime, multiplied over the ground and roads already drawn.
+    encoder.setRenderPipelineState(shadePipeline)
+    encoder.setDepthStencilState(depthRead)
+    encoder.setCullMode(.none)
+    encoder.setDepthBias(-2, slopeScale: -1, clamp: 0)
+    for i in shades.indices {
+      let chunk = city.chunks[i]
+      if hypot(chunk.x - x, chunk.z - z) < quality.detailRange + 160 && visible(chunk) { shades[i].draw(encoder, single: single) }
+    }
+    if env.sun.w > 0.05 {
+      encoder.setRenderPipelineState(poolPipeline)
+      var tint = SIMD4<Float>(0.55 * env.sun.w, 0.34 * env.sun.w, 0.14 * env.sun.w, 0)
+      encoder.setFragmentBytes(&tint, length: 16, index: 0)
+      for i in pools.indices {
+        let chunk = city.chunks[i]
+        if hypot(chunk.x - x, chunk.z - z) < 320 && visible(chunk) { pools[i].draw(encoder, single: single) }
+      }
+    }
+    encoder.setDepthBias(0, slopeScale: 0, clamp: 0)
+    encoder.setCullMode(.back)
 
     encoder.setRenderPipelineState(skyPipeline)
     encoder.setDepthStencilState(depthRead)
-    var sky = (matrix(basis), SIMD4<Float>(tanHalfY * aspect, tanHalfY, time, 0))
-    encoder.setFragmentBytes(&sky, length: MemoryLayout<(simd_float4x4, SIMD4<Float>)>.stride, index: 0)
+    var sky = (matrix(basis), SIMD4<Float>(tanHalfY * aspect, tanHalfY, time, 0), env)
+    encoder.setFragmentBytes(&sky, length: MemoryLayout<(simd_float4x4, SIMD4<Float>, EnvUniforms)>.stride, index: 0)
     encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+
+    if env.skyLow.w > 0.02 {
+      encoder.setRenderPipelineState(rainPipeline)
+      encoder.setCullMode(.none)
+      let bright = 0.55 + 0.35 * (1 - env.sun.w)
+      var rain = RainUniforms(viewProjection: clipFix * matrix(viewProjection), eyeTime: SIMD4(x, y, z, time),
+                              right: SIMD4(basis[0], basis[1], basis[2], 0),
+                              color: SIMD4(env.skyLow.x * bright + 0.25, env.skyLow.y * bright + 0.25, env.skyLow.z * bright + 0.27, 0.32 * env.skyLow.w))
+      encoder.setVertexBuffer(rainBuffer, offset: 0, index: 0)
+      encoder.setVertexBytes(&rain, length: MemoryLayout<RainUniforms>.stride, index: 1)
+      encoder.setFragmentBytes(&rain, length: MemoryLayout<RainUniforms>.stride, index: 1)
+      encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: WorldRenderer.RAIN_STREAKS * 6)
+      encoder.setCullMode(.back)
+    }
 
     if showDrone && rotor > 0.1 {
       encoder.setRenderPipelineState(glowPipeline)
@@ -368,6 +489,8 @@ final class WorldRenderer {
     terrain = GpuMesh(device, next.terrain)
     blocks = next.chunks.map { GpuMesh(device, $0.mesh) }
     details = next.chunks.map { GpuMesh(device, $0.detail) }
+    shades = next.chunks.map { GpuMesh(device, $0.shade) }
+    pools = next.chunks.map { GpuMesh(device, $0.glow) }
   }
 
   private func visible(_ chunk: City.Chunk) -> Bool {

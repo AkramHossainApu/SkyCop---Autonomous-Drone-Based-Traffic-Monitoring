@@ -29,6 +29,10 @@ final class InputMapping {
   private var rest = [Float](repeating: 0, count: 6)
   private var span = [Float](repeating: 1, count: 6)
   private var moved = [Bool](repeating: false, count: 6)
+  /// Where each stick really rests (see InputMapping.kt): a small, perfectly still offset becomes the center.
+  private var drift = [Float](repeating: 0, count: 4)
+  private var lastRaw = [Float](repeating: 0, count: 4)
+  private var still = [Int](repeating: 0, count: 4)
   private(set) var calibrated = false
 
   init() { configureStandard() }
@@ -57,7 +61,12 @@ final class InputMapping {
 
   private func signed(_ slot: Int, _ raw: [Float]) -> Float {
     let axis = channel[slot]
-    return axis < 0 ? 0 : ((raw[axis] - rest[slot]) * direction[slot]).clamped(-1, 1)
+    if axis < 0 { return 0 }
+    let value = (raw[axis] - rest[slot]) * direction[slot]
+    if abs(raw[axis] - lastRaw[slot]) < 0.004 { still[slot] += 1 } else { still[slot] = 0 }
+    lastRaw[slot] = raw[axis]
+    if still[slot] > 90 && abs(value) < 0.28 { drift[slot] = value }
+    return (value - drift[slot]).clamped(-1, 1)
   }
 
   private func trigger(_ slot: Int, _ raw: [Float], _ pressed: Bool) -> Float {

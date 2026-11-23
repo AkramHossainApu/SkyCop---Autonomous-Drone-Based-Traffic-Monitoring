@@ -1,12 +1,12 @@
 import Metal
 import simd
 
-/// The live camera in VR (LiveScreen.kt): the video hangs as a screen three meters ahead in a dark
-/// room and stays put while the head moves. It takes the video's own upright shape, after the
+/// The live camera in VR (LiveScreen.kt): a still picture in each eye, filling it as far as the
+/// video's shape allows, with no head tracking. It takes the video's own upright shape, after the
 /// rotation a phone camera sends with each frame, so nothing is cropped whichever way it is held.
 final class LiveScreen {
   private static let DISTANCE: Float = 3
-  static let ROOM = MTLClearColor(red: 0.035, green: 0.04, blue: 0.05, alpha: 1)
+  static let ROOM = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
   private static let source = """
   #include <metal_stdlib>
   using namespace metal;
@@ -99,13 +99,9 @@ final class LiveScreen {
     guard hasVideo, planes.count == 3 else { return }
     let D = LiveScreen.DISTANCE
     let a = uprightAspect
-    var halfHeight: Float
-    if vr {
-      halfHeight = a >= 1 ? min(D * tan(33 * DEG) / a, D * tan(30 * DEG)) : D * tan(30 * DEG)
-    } else {
-      let fit = D * tanHalfY * 0.94
-      halfHeight = min(fit, fit * viewAspect / a)
-    }
+    // As big as each eye allows with the whole frame in view (LiveScreen.kt).
+    let fitHeight = D * tanHalfY * (vr ? 0.96 : 1)
+    let halfHeight = min(fitHeight, fitHeight * viewAspect / a)
     let halfWidth = halfHeight * a
     Mat4.perspective(&projection, tanHalfY, viewAspect, 0.05, 50)
     Mat4.view(&view, basis, x, y, z)
@@ -131,7 +127,7 @@ final class LiveScreen {
     encoder.setDepthStencilState(depthOff)
     encoder.setCullMode(.none)
     var frame = Params(matrix: toMetal * matrix, rect: SIMD4(halfWidth + 0.04, halfHeight + 0.04, D + 0.01, 0),
-                       uvLow: .zero, uvHigh: .zero, solid: SIMD4(0.11, 0.12, 0.13, 1))
+                       uvLow: .zero, uvHigh: .zero, solid: SIMD4(0, 0, 0, 1))
     encoder.setVertexBytes(&frame, length: MemoryLayout<Params>.stride, index: 0)
     encoder.setFragmentBytes(&frame, length: MemoryLayout<Params>.stride, index: 0)
     encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 6)

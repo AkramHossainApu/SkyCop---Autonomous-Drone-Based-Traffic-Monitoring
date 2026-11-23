@@ -1,7 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
   <!-- Controller rumble. -->
   <uses-permission android:name="android.permission.VIBRATE" />
-  <application>
+  <!-- The real-map city meshes are large; give the app the bigger heap. -->
+  <application android:largeHeap="true">
     <activity
       android:name="com.skycop.sim.SimulationActivity"
       android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize|screenLayout|smallestScreenSize|uiMode|density"

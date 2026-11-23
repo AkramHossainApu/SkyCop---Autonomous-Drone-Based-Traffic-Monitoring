@@ -116,6 +116,20 @@ class Traffic(private val city: City, seed: Int = 71) {
     private val fromX: FloatArray; private val fromY: FloatArray; private val fromZ: FloatArray; private val fromYaw: FloatArray
     private val toX: FloatArray; private val toY: FloatArray; private val toZ: FloatArray; private val toYaw: FloatArray
     private val laneCars: Array<IntList>
+    /** Room on each lane already promised to vehicles still crossing the junction into it. */
+    private val reserved: FloatArray
+    /** When each vehicle started waiting for room on its chosen exit, or -1. */
+    private val blockedSince: FloatArray
+    /** The vehicle first in line for room on each lane where two queues merge, and since when. */
+    private val claimBy: IntArray
+    private val claimAt: FloatArray
+    /** When each vehicle started waiting at the line, or -1. */
+    private val queuedSince: FloatArray
+    /** The speed a vehicle can take its next turn at, from how tight the turn is. */
+    private val turnSpeed: FloatArray
+    /** The curve it just came through, where its rear wheels still are: 6 floats each, and its length. */
+    private val tail: FloatArray
+    private val tailLength: FloatArray
 
     var time = 0f
         private set
@@ -233,6 +247,14 @@ class Traffic(private val city: City, seed: Int = 71) {
         fromX = FloatArray(count); fromY = FloatArray(count); fromZ = FloatArray(count); fromYaw = FloatArray(count)
         toX = FloatArray(count); toY = FloatArray(count); toZ = FloatArray(count); toYaw = FloatArray(count)
         laneCars = Array(laneCount) { IntList() }
+        reserved = FloatArray(laneCount)
+        blockedSince = FloatArray(count) { -1f }
+        claimBy = IntArray(laneCount) { -1 }
+        claimAt = FloatArray(laneCount)
+        queuedSince = FloatArray(count) { -1f }
+        turnSpeed = FloatArray(count) { 16f }
+        tail = FloatArray(count * 6)
+        tailLength = FloatArray(count)
 
         var car = 0
         for (l in 0 until laneCount) {
@@ -362,6 +384,11 @@ class Traffic(private val city: City, seed: Int = 71) {
             pick -= turnWeight(car, hx, hz, outLanes[i])
             if (pick <= 0f) { chosen = outLanes[i]; break }
         }
+        connect(car, chosen, ax, az, hx, hz)
+    }
+
+    /** The curve from the stop point (ax, az) heading (hx, hz) onto [chosen]. */
+    private fun connect(car: Int, chosen: Int, ax: Float, az: Float, hx: Float, hz: Float) {
         nextLane[car] = chosen
         lanePoint(chosen, trimStart[chosen], 0)
         val bx = tmp[0]; val bz = tmp[1]; val gx = tmp[2]; val gz = tmp[3]
@@ -384,6 +411,10 @@ class Traffic(private val city: City, seed: Int = 71) {
             lx = qx; lz = qz
         }
         connectorLength[car] = max(0.5f, length)
+        // Drivers slow to what the turn allows: Dhaka drivers take about 2.8 m/s2 of sideways acceleration.
+        val turn = acos((hx * gx + hz * gz).coerceIn(-1f, 1f))
+        val radius = connectorLength[car] / max(turn, 0.05f)
+        turnSpeed[car] = sqrt(2.8f * radius).coerceIn(3f, 16f)
     }
 
     private fun turnWeight(car: Int, hx: Float, hz: Float, next: Int): Float {
@@ -397,26 +428,59 @@ class Traffic(private val city: City, seed: Int = 71) {
         return w / max(1, lanesThatWay)
     }
 
-    /** Where the vehicle is now, into to*: on its lane, or on the curve through a junction. */
+    /** Where the vehicle is now, into to*. Its body lies between its front and rear wheels on the path. */
     private fun locate(car: Int) {
         val l = lane[car]
         val stop = laneLength[l] - trimEnd[l]
         val d = s[car]
         if (d <= stop || nextLane[car] < 0) {
             segment[car] = lanePoint(l, min(d, laneLength[l]), segment[car])
-            toX[car] = tmp[0]; toZ[car] = tmp[1]; toY[car] = lastHeight
-            toYaw[car] = atan2(tmp[2], -tmp[3])
+            toY[car] = lastHeight
         } else {
-            val t = ((d - stop) / connectorLength[car]).coerceIn(0f, 1f); val u = 1f - t
-            val o = car * 6
-            val ax = connector[o]; val az = connector[o + 1]; val cx = connector[o + 2]; val cz = connector[o + 3]
-            val bx = connector[o + 4]; val bz = connector[o + 5]
-            toX[car] = u * u * ax + 2 * u * t * cx + t * t * bx
-            toZ[car] = u * u * az + 2 * u * t * cz + t * t * bz
-            val dx = 2 * u * (cx - ax) + 2 * t * (bx - cx); val dz = 2 * u * (cz - az) + 2 * t * (bz - cz)
-            if (abs(dx) + abs(dz) > 1e-4f) toYaw[car] = atan2(dx, -dz)
             toY[car] = map.nodeY[laneEndNode[l]]
         }
+        pathPoint(car, d)
+        toX[car] = pathX; toZ[car] = pathZ
+        // The wheels follow the path, so the body swings round through a turn instead of pivoting.
+        val axle = LENGTH[type[car]] * 0.3f
+        pathPoint(car, d + axle)
+        val frontX = pathX; val frontZ = pathZ
+        pathPoint(car, d - axle)
+        val dx = frontX - pathX; val dz = frontZ - pathZ
+        if (abs(dx) + abs(dz) > 1e-4f) toYaw[car] = atan2(dx, -dz)
+    }
+
+    private var pathX = 0f
+    private var pathZ = 0f
+
+    /**
+     * The point [d] along the vehicle's path into pathX, pathZ: back through the curve it came in on,
+     * along its lane, through the next junction and on into the next lane.
+     */
+    private fun pathPoint(car: Int, d: Float) {
+        val l = lane[car]
+        val stop = laneLength[l] - trimEnd[l]
+        val next = nextLane[car]
+        if (d < trimStart[l] && tailLength[car] > 0f) {
+            curve(tail, car * 6, (1f - (trimStart[l] - d) / tailLength[car]).coerceIn(0f, 1f))
+        } else if (d <= stop || next < 0) {
+            val on = d.coerceIn(0f, laneLength[l])
+            lanePoint(l, on, segment[car])
+            pathX = tmp[0] + tmp[2] * (d - on); pathZ = tmp[1] + tmp[3] * (d - on)
+        } else if (d <= stop + connectorLength[car]) {
+            curve(connector, car * 6, (d - stop) / connectorLength[car])
+        } else {
+            val along = trimStart[next] + d - stop - connectorLength[car]
+            val on = min(along, laneLength[next])
+            lanePoint(next, on, 0)
+            pathX = tmp[0] + tmp[2] * (along - on); pathZ = tmp[1] + tmp[3] * (along - on)
+        }
+    }
+
+    private fun curve(points: FloatArray, o: Int, t: Float) {
+        val u = 1f - t
+        pathX = u * u * points[o] + 2 * u * t * points[o + 2] + t * t * points[o + 4]
+        pathZ = u * u * points[o + 1] + 2 * u * t * points[o + 3] + t * t * points[o + 5]
     }
 
     // ---- Simulation ---------------------------------------------------------------------------
@@ -449,6 +513,9 @@ class Traffic(private val city: City, seed: Int = 71) {
         }
     }
 
+    /** Who a vehicle would hold the junction for: its lane, or at a signal everyone on its green. */
+    private var entryKey = -1
+
     /** 0: go. 1: red light. 2: another approach has the junction. 3: no room on the far side. */
     private fun mayEnter(car: Int, node: Int, comfortable: Boolean): Int {
         val l = lane[car]
@@ -457,20 +524,66 @@ class Traffic(private val city: City, seed: Int = 71) {
             val axis = if (abs(tmp[2]) > abs(tmp[3])) 1 else 0
             val phase = Signals.phase(time, axis, node and 1)
             if (phase == 2 || (phase == 1 && comfortable)) return 1
+            // Everyone with the green goes together; the signal keeps the cross traffic apart, and
+            // the junction only waits for the last of the other axis to clear it.
+            entryKey = -2 - axis
+            if (holder[node] != -1 && holder[node] != entryKey) return 2
+            return if (mayTake(car, nextLane[car])) 0 else 3
         }
+        entryKey = key
         // A request nobody could act on for long is dropped, so a jam elsewhere cannot lock this junction.
         if (requestKey[node] != -1 && time - requestSince[node] > 12f) requestKey[node] = -1
         if (holder[node] != -1 && holder[node] != key) return 2
         if (requestKey[node] != -1 && requestKey[node] != key && time - requestSince[node] > 3.5f) return 2
-        val next = nextLane[car]
-        if (next >= 0) {
-            val cars = laneCars[next]
-            if (cars.size > 0) {
-                val last = cars[0]
-                if (s[last] - LENGTH[type[last]] / 2 < trimStart[next] + LENGTH[type[car]] + 2f) return 3
-            }
+        return if (mayTake(car, nextLane[car])) 0 else 3
+    }
+
+    /**
+     * Room on [next] for [car], taking turns where queues merge: whoever found it full first gets
+     * the next space, so the queue that happens to be checked first cannot starve the other.
+     */
+    private fun mayTake(car: Int, next: Int): Boolean {
+        if (next < 0) return true
+        val claimant = claimBy[next]
+        val claimed = claimant >= 0 && time - claimAt[next] < 2f
+        // Whoever has waited longest goes first.
+        val mine = if (queuedSince[car] < 0f) time else queuedSince[car]
+        if (claimed && claimant != car && mine >= (if (queuedSince[claimant] < 0f) time else queuedSince[claimant])) return false
+        if (hasRoom(car, next)) {
+            if (claimant >= 0) claimBy[next] = -1
+            return true
         }
-        return 0
+        claimBy[next] = car; claimAt[next] = time
+        return false
+    }
+
+    /**
+     * Whether [car] would fit on [next] past the junction, counting the room promised to vehicles
+     * still crossing into it: nobody enters a junction they cannot leave.
+     */
+    private fun hasRoom(car: Int, next: Int): Boolean {
+        val need = reserved[next] + LENGTH[type[car]] + 2f
+        val cars = laneCars[next]
+        if (cars.size == 0) return reserved[next] < 0.01f || trimStart[next] + need <= laneLength[next] - trimEnd[next] + 2f
+        val last = cars[0]
+        return s[last] - LENGTH[type[last]] / 2 >= trimStart[next] + need
+    }
+
+    /** After waiting a while for a full exit, take another way out that has room, if there is one. */
+    private fun reroute(car: Int) {
+        val l = lane[car]
+        val from = outStart[l]; val to = outStart[l + 1]
+        lanePoint(l, laneLength[l] - trimEnd[l], segment[car])
+        val ax = tmp[0]; val az = tmp[1]; val hx = tmp[2]; val hz = tmp[3]
+        var best = -1; var bestWeight = 0f
+        for (i in from until to) {
+            val option = outLanes[i]
+            if (option == nextLane[car] || !hasRoom(car, option)) continue
+            val w = turnWeight(car, hx, hz, option)
+            if (w > bestWeight) { bestWeight = w; best = option }
+        }
+        if (best >= 0) connect(car, best, ax, az, hx, hz)
+        blockedSince[car] = -1f
     }
 
     private fun step() {
@@ -505,7 +618,10 @@ class Traffic(private val city: City, seed: Int = 71) {
 
                 val node = laneEndNode[l]
                 val stop = laneLength[l] - trimEnd[l]
-                if (controlled[node] && !admitted[car] && nextLane[car] >= 0) {
+                // Only the first car waiting at the line asks to go: one admitted behind a car that is still
+                // waiting would hold the junction without being able to cross it.
+                val firstInLine = k + 1 >= cars.size || admitted[cars[k + 1]]
+                if (controlled[node] && !admitted[car] && nextLane[car] >= 0 && firstInLine) {
                     val toLine = stop - 0.4f - (position + half)
                     if (toLine < v * v / 5f + 6f) {
                         lanePoint(l, stop, segment[car])
@@ -513,12 +629,24 @@ class Traffic(private val city: City, seed: Int = 71) {
                         val answer = mayEnter(car, node, comfortable)
                         if (answer == 0) {
                             admitted[car] = true
-                            holder[node] = laneKey[l]
+                            holder[node] = entryKey
                             inside[node]++
                             if (requestKey[node] == laneKey[l]) requestKey[node] = -1
+                            reserved[nextLane[car]] += LENGTH[type[car]] + 2f
+                            blockedSince[car] = -1f
+                            queuedSince[car] = -1f
                         } else {
+                            if (queuedSince[car] < 0f) queuedSince[car] = time
+                            if (answer == 3) {
+                                if (blockedSince[car] < 0f) blockedSince[car] = time
+                                else if (time - blockedSince[car] > 4f) reroute(car)
+                            } else {
+                                blockedSince[car] = -1f
+                            }
                             // Waiting on cross traffic: ask for a turn, so a busy road cannot hold the junction forever.
-                            if (answer == 2 && requestKey[node] == -1) { requestKey[node] = laneKey[l]; requestSince[node] = time }
+                            if (answer == 2 && requestKey[node] == -1 && map.nodeFlags[node] and 1 == 0) {
+                                requestKey[node] = laneKey[l]; requestSince[node] = time
+                            }
                             if (toLine + 0.3f < gap) { gap = max(toLine + 0.3f, 0.05f); closing = v }
                         }
                     }
@@ -528,7 +656,12 @@ class Traffic(private val city: City, seed: Int = 71) {
                     if (toEnd < gap) { gap = max(toEnd, 0.05f); closing = v }
                 }
 
-                val limit = max(0.05f, desired[car] * pace[car])
+                var limit = max(0.05f, desired[car] * pace[car])
+                // Slow down ahead of a turn, braking gently to the speed the turn allows.
+                if (nextLane[car] >= 0) {
+                    val toTurn = stop - position
+                    if (toTurn < 60f) limit = min(limit, sqrt(turnSpeed[car] * turnSpeed[car] + 4f * max(0f, toTurn)))
+                }
                 val wantedGap = 1.2f + max(0f, v * 1.0f + v * closing / (2f * sqrt(2.2f * 3.2f)))
                 val ratio = min(v / limit, 1.6f)
                 val squeeze = wantedGap / max(gap, 0.05f)
@@ -561,8 +694,11 @@ class Traffic(private val city: City, seed: Int = 71) {
                     admitted[car] = false
                     inside[node] = max(0, inside[node] - 1)
                     if (inside[node] == 0) holder[node] = -1
+                    reserved[next] = max(0f, reserved[next] - LENGTH[type[car]] - 2f)
                 }
                 val overshoot = s[car] - end
+                connector.copyInto(tail, car * 6, car * 6, car * 6 + 6)
+                tailLength[car] = connectorLength[car]
                 lane[car] = next
                 s[car] = trimStart[next] + overshoot
                 previousS[car] = s[car]
@@ -590,6 +726,7 @@ class Traffic(private val city: City, seed: Int = 71) {
             speed[car] = desired[car] * 0.6f
             segment[car] = 0
             admitted[car] = false
+            tailLength[car] = 0f
             laneCars[target].insert(0, car)
             chooseNext(car)
             locate(car)

@@ -62,6 +62,20 @@ final class Traffic {
   private var fromX: [Float] = [], fromY: [Float] = [], fromZ: [Float] = [], fromYaw: [Float] = []
   private var toX: [Float] = [], toY: [Float] = [], toZ: [Float] = [], toYaw: [Float] = []
   private var laneCars: [[Int]] = []
+  /// Room on each lane already promised to vehicles still crossing the junction into it.
+  private var reserved: [Float] = []
+  /// When each vehicle started waiting for room on its chosen exit, or -1.
+  private var blockedSince: [Float] = []
+  /// The vehicle first in line for room on each lane where two queues merge, and since when.
+  private var claimBy: [Int] = []
+  private var claimAt: [Float] = []
+  /// When each vehicle started waiting at the line, or -1.
+  private var queuedSince: [Float] = []
+  /// The speed a vehicle can take its next turn at (see Traffic.kt).
+  private var turnSpeed: [Float] = []
+  /// The curve it just came through, where its rear wheels still are: 6 floats each, and its length.
+  private var tail: [Float] = []
+  private var tailLength: [Float] = []
 
   private(set) var time: Float = 0
   private var accumulator: Float = 0
@@ -175,6 +189,14 @@ final class Traffic {
     desired = zeros; pace = [Float](repeating: 1, count: n); paceTarget = pace; paceUntil = zeros
     fromX = zeros; fromY = zeros; fromZ = zeros; fromYaw = zeros; toX = zeros; toY = zeros; toZ = zeros; toYaw = zeros
     laneCars = [[Int]](repeating: [], count: laneCount)
+    reserved = [Float](repeating: 0, count: laneCount)
+    blockedSince = [Float](repeating: -1, count: n)
+    claimBy = [Int](repeating: -1, count: laneCount)
+    claimAt = [Float](repeating: 0, count: laneCount)
+    queuedSince = [Float](repeating: -1, count: n)
+    turnSpeed = [Float](repeating: 16, count: n)
+    tail = [Float](repeating: 0, count: n * 6)
+    tailLength = [Float](repeating: 0, count: n)
 
     var car = 0
     for l in 0..<laneCount {
@@ -299,6 +321,11 @@ final class Traffic {
       pick -= turnWeight(car, hx, hz, outLanes[i])
       if pick <= 0 { chosen = outLanes[i]; break }
     }
+    connect(car, chosen, ax, az, hx, hz)
+  }
+
+  /// The curve from the stop point (ax, az) heading (hx, hz) onto `chosen`.
+  private func connect(_ car: Int, _ chosen: Int, _ ax: Float, _ az: Float, _ hx: Float, _ hz: Float) {
     nextLane[car] = chosen
     lanePoint(chosen, trimStart[chosen], 0)
     let bx = tmp[0], bz = tmp[1], gx = tmp[2], gz = tmp[3]
@@ -320,6 +347,9 @@ final class Traffic {
       lx = qx; lz = qz
     }
     connectorLength[car] = max(0.5, length)
+    let turn = acos(min(max(hx * gx + hz * gz, -1), 1))
+    let radius = connectorLength[car] / max(turn, 0.05)
+    turnSpeed[car] = min(max(sqrt(2.8 * radius), 3), 16)
   }
 
   private func turnWeight(_ car: Int, _ hx: Float, _ hz: Float, _ next: Int) -> Float {
@@ -333,25 +363,54 @@ final class Traffic {
     return w / Float(max(1, lanesThatWay))
   }
 
+  /// Where the vehicle is now, into to*. Its body lies between its front and rear wheels on the path.
   private func locate(_ car: Int) {
     let l = lane[car]
     let stop = laneLength[l] - trimEnd[l]
     let d = s[car]
     if d <= stop || nextLane[car] < 0 {
       segment[car] = lanePoint(l, min(d, laneLength[l]), segment[car])
-      toX[car] = tmp[0]; toZ[car] = tmp[1]; toY[car] = lastHeight
-      toYaw[car] = atan2(tmp[2], -tmp[3])
+      toY[car] = lastHeight
     } else {
-      let t = ((d - stop) / connectorLength[car]).clamped(0, 1), u = 1 - t
-      let o = car * 6
-      let ax = connector[o], az = connector[o + 1], cx = connector[o + 2], cz = connector[o + 3]
-      let bx = connector[o + 4], bz = connector[o + 5]
-      toX[car] = u * u * ax + 2 * u * t * cx + t * t * bx
-      toZ[car] = u * u * az + 2 * u * t * cz + t * t * bz
-      let dx = 2 * u * (cx - ax) + 2 * t * (bx - cx), dz = 2 * u * (cz - az) + 2 * t * (bz - cz)
-      if abs(dx) + abs(dz) > 1e-4 { toYaw[car] = atan2(dx, -dz) }
       toY[car] = map.nodeY[laneEndNode[l]]
     }
+    pathPoint(car, d)
+    toX[car] = pathX; toZ[car] = pathZ
+    let axle = T.LENGTH[type[car]] * 0.3
+    pathPoint(car, d + axle)
+    let frontX = pathX, frontZ = pathZ
+    pathPoint(car, d - axle)
+    let dx = frontX - pathX, dz = frontZ - pathZ
+    if abs(dx) + abs(dz) > 1e-4 { toYaw[car] = atan2(dx, -dz) }
+  }
+
+  private var pathX: Float = 0, pathZ: Float = 0
+
+  /// The point `d` along the vehicle's path (see Traffic.kt) into pathX, pathZ.
+  private func pathPoint(_ car: Int, _ d: Float) {
+    let l = lane[car]
+    let stop = laneLength[l] - trimEnd[l]
+    let next = nextLane[car]
+    if d < trimStart[l] && tailLength[car] > 0 {
+      curve(tail, car * 6, (1 - (trimStart[l] - d) / tailLength[car]).clamped(0, 1))
+    } else if d <= stop || next < 0 {
+      let on = d.clamped(0, laneLength[l])
+      lanePoint(l, on, segment[car])
+      pathX = tmp[0] + tmp[2] * (d - on); pathZ = tmp[1] + tmp[3] * (d - on)
+    } else if d <= stop + connectorLength[car] {
+      curve(connector, car * 6, (d - stop) / connectorLength[car])
+    } else {
+      let along = trimStart[next] + d - stop - connectorLength[car]
+      let on = min(along, laneLength[next])
+      lanePoint(next, on, 0)
+      pathX = tmp[0] + tmp[2] * (along - on); pathZ = tmp[1] + tmp[3] * (along - on)
+    }
+  }
+
+  private func curve(_ points: [Float], _ o: Int, _ t: Float) {
+    let u = 1 - t
+    pathX = u * u * points[o] + 2 * u * t * points[o + 2] + t * t * points[o + 4]
+    pathZ = u * u * points[o + 1] + 2 * u * t * points[o + 3] + t * t * points[o + 5]
   }
 
   // MARK: Simulation
@@ -384,6 +443,9 @@ final class Traffic {
   }
 
   /// 0: go. 1: red light. 2: another approach has the junction. 3: no room on the far side.
+  /// Who a vehicle would hold the junction for: its lane, or at a signal everyone on its green.
+  private var entryKey = -1
+
   private func mayEnter(_ car: Int, _ node: Int, _ comfortable: Bool) -> Int {
     let l = lane[car]
     let key = laneKey[l]
@@ -391,15 +453,56 @@ final class Traffic {
       let axis = abs(tmp[2]) > abs(tmp[3]) ? 1 : 0
       let phase = Signals.phase(time, axis, node & 1)
       if phase == 2 || (phase == 1 && comfortable) { return 1 }
+      // Everyone with the green goes together (see Traffic.kt).
+      entryKey = -2 - axis
+      if holder[node] != -1 && holder[node] != entryKey { return 2 }
+      return mayTake(car, nextLane[car]) ? 0 : 3
     }
+    entryKey = key
     if requestKey[node] != -1 && time - requestSince[node] > 12 { requestKey[node] = -1 }
     if holder[node] != -1 && holder[node] != key { return 2 }
     if requestKey[node] != -1 && requestKey[node] != key && time - requestSince[node] > 3.5 { return 2 }
-    let next = nextLane[car]
-    if next >= 0, let last = laneCars[next].first {
-      if s[last] - T.LENGTH[type[last]] / 2 < trimStart[next] + T.LENGTH[type[car]] + 2 { return 3 }
+    return mayTake(car, nextLane[car]) ? 0 : 3
+  }
+
+  /// Room on `next` for `car`, taking turns where queues merge (see Traffic.kt).
+  private func mayTake(_ car: Int, _ next: Int) -> Bool {
+    if next < 0 { return true }
+    let claimant = claimBy[next]
+    let claimed = claimant >= 0 && time - claimAt[next] < 2
+    let mine = queuedSince[car] < 0 ? time : queuedSince[car]
+    if claimed && claimant != car && mine >= (queuedSince[claimant] < 0 ? time : queuedSince[claimant]) { return false }
+    if hasRoom(car, next) {
+      if claimant >= 0 { claimBy[next] = -1 }
+      return true
     }
-    return 0
+    claimBy[next] = car; claimAt[next] = time
+    return false
+  }
+
+  /// Whether `car` fits on `next` past the junction, counting room promised to vehicles still crossing into it.
+  private func hasRoom(_ car: Int, _ next: Int) -> Bool {
+    let need = reserved[next] + T.LENGTH[type[car]] + 2
+    guard let last = laneCars[next].first else { return reserved[next] < 0.01 || trimStart[next] + need <= laneLength[next] - trimEnd[next] + 2 }
+    return s[last] - T.LENGTH[type[last]] / 2 >= trimStart[next] + need
+  }
+
+  /// After waiting a while for a full exit, take another way out that has room, if there is one.
+  private func reroute(_ car: Int) {
+    let l = lane[car]
+    let from = outStart[l], to = outStart[l + 1]
+    lanePoint(l, laneLength[l] - trimEnd[l], segment[car])
+    let ax = tmp[0], az = tmp[1], hx = tmp[2], hz = tmp[3]
+    var best = -1
+    var bestWeight: Float = 0
+    for i in from..<to {
+      let option = outLanes[i]
+      if option == nextLane[car] || !hasRoom(car, option) { continue }
+      let w = turnWeight(car, hx, hz, option)
+      if w > bestWeight { bestWeight = w; best = option }
+    }
+    if best >= 0 { connect(car, best, ax, az, hx, hz) }
+    blockedSince[car] = -1
   }
 
   private func step() {
@@ -434,7 +537,9 @@ final class Traffic {
 
         let node = laneEndNode[l]
         let stop = laneLength[l] - trimEnd[l]
-        if controlled[node] && !admitted[car] && nextLane[car] >= 0 {
+        // Only the first car waiting at the line asks to go (see Traffic.kt).
+        let firstInLine = k + 1 >= cars.count || admitted[cars[k + 1]]
+        if controlled[node] && !admitted[car] && nextLane[car] >= 0 && firstInLine {
           let toLine = stop - 0.4 - (position + half)
           if toLine < v * v / 5 + 6 {
             lanePoint(l, stop, segment[car])
@@ -442,11 +547,20 @@ final class Traffic {
             let answer = mayEnter(car, node, comfortable)
             if answer == 0 {
               admitted[car] = true
-              holder[node] = laneKey[l]
+              holder[node] = entryKey
               inside[node] += 1
               if requestKey[node] == laneKey[l] { requestKey[node] = -1 }
+              reserved[nextLane[car]] += T.LENGTH[type[car]] + 2
+              blockedSince[car] = -1
+              queuedSince[car] = -1
             } else {
-              if answer == 2 && requestKey[node] == -1 { requestKey[node] = laneKey[l]; requestSince[node] = time }
+              if queuedSince[car] < 0 { queuedSince[car] = time }
+              if answer == 3 {
+                if blockedSince[car] < 0 { blockedSince[car] = time } else if time - blockedSince[car] > 4 { reroute(car) }
+              } else {
+                blockedSince[car] = -1
+              }
+              if answer == 2 && requestKey[node] == -1 && map.nodeFlags[node] & 1 == 0 { requestKey[node] = laneKey[l]; requestSince[node] = time }
               if toLine + 0.3 < gap { gap = max(toLine + 0.3, 0.05); closing = v }
             }
           }
@@ -455,7 +569,11 @@ final class Traffic {
           if toEnd < gap { gap = max(toEnd, 0.05); closing = v }
         }
 
-        let limit = max(0.05, desired[car] * pace[car])
+        var limit = max(0.05, desired[car] * pace[car])
+        if nextLane[car] >= 0 {
+          let toTurn = stop - position
+          if toTurn < 60 { limit = min(limit, sqrt(turnSpeed[car] * turnSpeed[car] + 4 * max(0, toTurn))) }
+        }
         let wantedGap = 1.2 + max(0, v * 1.0 + v * closing / (2 * sqrt(Float(2.2 * 3.2))))
         let ratio = min(v / limit, 1.6)
         let squeeze = wantedGap / max(gap, 0.05)
@@ -485,8 +603,11 @@ final class Traffic {
           admitted[car] = false
           inside[node] = max(0, inside[node] - 1)
           if inside[node] == 0 { holder[node] = -1 }
+          reserved[next] = max(0, reserved[next] - T.LENGTH[type[car]] - 2)
         }
         let overshoot = s[car] - end
+        for k in 0..<6 { tail[car * 6 + k] = connector[car * 6 + k] }
+        tailLength[car] = connectorLength[car]
         lane[car] = next
         s[car] = trimStart[next] + overshoot
         previousS[car] = s[car]
@@ -512,6 +633,7 @@ final class Traffic {
       speed[car] = desired[car] * 0.6
       segment[car] = 0
       admitted[car] = false
+      tailLength[car] = 0
       laneCars[target].insert(car, at: 0)
       chooseNext(car)
       locate(car)

@@ -13,6 +13,14 @@ object Mat {
     const val TINT = 5
     const val WATER = 6
     const val STROBE = 7
+    /** Textured concrete that casts no shadow-map shadow: thin sunshades, whose shadows would alias. */
+    const val LEDGE = 8
+    /** Painted curb stones: the vertex color alternating with black in blocks along the ground. */
+    const val STRIPED = 9
+    /** Head, tail and street lamps: dim by day, glowing at night. */
+    const val LAMP = 22
+    /** A window whose room lights up at night. */
+    const val NIGHT_WINDOW = 23
     /** Twelve ids: group * 6 + axis * 3 + (0 green, 1 yellow, 2 red). */
     const val SIGNAL = 10
     /** From here on, an id is [TEXTURED] + the texture layer. */
@@ -75,6 +83,25 @@ class MeshBuilder {
         data[at] = x.toRawBits(); data[at + 1] = y.toRawBits(); data[at + 2] = z.toRawBits()
         data[at + 3] = normal; data[at + 4] = color
         vertices++
+    }
+
+    /**
+     * A soft shadow decal for the shade pass, which multiplies what is already drawn by a gray level
+     * per corner: 0 is black, 1 leaves the surface as it is.
+     */
+    fun shadeQuad(
+        ax: Float, ay: Float, az: Float, bx: Float, by: Float, bz: Float,
+        cx: Float, cy: Float, cz: Float, dx: Float, dy: Float, dz: Float,
+        ka: Float, kb: Float, kc: Float, kd: Float,
+    ) {
+        val up = packNormal(0f, 1f, 0f, 4)
+        vertex(ax, ay, az, up, gray(ka)); vertex(bx, by, bz, up, gray(kb)); vertex(cx, cy, cz, up, gray(kc))
+        vertex(ax, ay, az, up, gray(ka)); vertex(cx, cy, cz, up, gray(kc)); vertex(dx, dy, dz, up, gray(kd))
+    }
+
+    private fun gray(k: Float): Int {
+        val v = (k.coerceIn(0f, 1f) * 255f + 0.5f).toInt()
+        return v or (v shl 8) or (v shl 16)
     }
 
     /** Four corners, counter-clockwise when seen from the front. */

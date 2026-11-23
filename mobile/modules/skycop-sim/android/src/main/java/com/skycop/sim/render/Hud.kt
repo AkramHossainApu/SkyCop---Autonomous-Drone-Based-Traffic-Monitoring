@@ -155,9 +155,11 @@ internal class Hud(private val batch: HudBatch) {
         val w = if (vr) min(205f, halfWidth * 0.6f) else halfWidth - 14f
         val h = if (vr) 138f else HALF_HEIGHT - 12f
         val size = if (vr) 13f else 15f
-        if (game.liveHasVideo) tag("LIVE CAMERA", -w, -h, size, GOOD, 0f)
-        else tag("WAITING FOR VIDEO", 0f, 0f, size + 2f, WARN, 0.5f)
-        if (game.clock - game.liveSince < 5f) {
+        // Labels only for the first seconds, then the picture alone.
+        val fresh = game.clock - game.liveSince < 5f
+        if (!game.liveHasVideo) tag("WAITING FOR VIDEO", 0f, 0f, size + 2f, WARN, 0.5f)
+        else if (fresh) tag("LIVE CAMERA", -w, -h, size, GOOD, 0f)
+        if (fresh) {
             tag(if (game.controllerName == null) "TAP: MENU" else "X OR B: SIMULATION   START: MENU", 0f, h - size, size, MUTED, 0.5f)
         }
     }
@@ -249,6 +251,8 @@ internal class Hud(private val batch: HudBatch) {
         MenuItem.LAYOUT -> if (s.classicLayout) "CLASSIC" else "PILOT"
         MenuItem.VR -> if (s.vr) "VR HEADSET" else "FULL SCREEN"
         MenuItem.MAP -> MapData.TITLES[s.map]
+        MenuItem.TIME -> Environment.TIMES[s.timeOfDay]
+        MenuItem.WEATHER -> Environment.WEATHERS[s.weather]
         MenuItem.INVERT_CLIMB -> onOff(s.invertClimb)
         MenuItem.INVERT_LOOK -> onOff(s.invertLook)
         MenuItem.HEAD -> onOff(s.headTracking)

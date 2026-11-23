@@ -223,8 +223,10 @@ final class Hud {
     let w = vr ? min(205, halfWidth * 0.6) : halfWidth - 14
     let h: Float = vr ? 138 : H.HALF_HEIGHT - 12
     let size: Float = vr ? 13 : 15
-    if game.liveHasVideo { tag("LIVE CAMERA", -w, -h, size, H.GOOD, 0) } else { tag("WAITING FOR VIDEO", 0, 0, size + 2, H.WARN, 0.5) }
-    if game.clock - game.liveSince < 5 {
+    // Labels only for the first seconds, then the picture alone.
+    let fresh = game.clock - game.liveSince < 5
+    if !game.liveHasVideo { tag("WAITING FOR VIDEO", 0, 0, size + 2, H.WARN, 0.5) } else if fresh { tag("LIVE CAMERA", -w, -h, size, H.GOOD, 0) }
+    if fresh {
       tag(game.controllerName == nil ? "TAP: MENU" : "X OR B: SIMULATION   MENU: MENU", 0, h - size, size, H.MUTED, 0.5)
     }
   }
@@ -307,6 +309,8 @@ final class Hud {
     case .layout: return s.classicLayout ? "CLASSIC" : "PILOT"
     case .vr: return s.vr ? "VR HEADSET" : "FULL SCREEN"
     case .map: return MapData.TITLES[s.map]
+    case .time: return Environment.TIMES[s.timeOfDay]
+    case .weather: return Environment.WEATHERS[s.weather]
     case .invertClimb: return onOff(s.invertClimb)
     case .invertLook: return onOff(s.invertLook)
     case .head: return onOff(s.headTracking)
@@ -359,7 +363,7 @@ struct QualityLevel { let detailRange: Float; let shadowDetailRange: Float; let 
 let QUALITY_LEVELS = [
   QualityLevel(detailRange: 210, shadowDetailRange: 120, carRange: 300, shadows: true, relief: true),
   QualityLevel(detailRange: 125, shadowDetailRange: 55, carRange: 210, shadows: true, relief: true),
-  QualityLevel(detailRange: 90, shadowDetailRange: 0, carRange: 150, shadows: false, relief: false),
+  QualityLevel(detailRange: 95, shadowDetailRange: 25, carRange: 150, shadows: true, relief: true),
 ]
 
 final class QualityGovernor {

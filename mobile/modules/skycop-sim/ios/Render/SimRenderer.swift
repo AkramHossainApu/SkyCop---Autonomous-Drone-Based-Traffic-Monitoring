@@ -242,7 +242,7 @@ final class SimRenderer: NSObject, MTKViewDelegate {
         encoder.setScissorRect(MTLScissorRect(x: i * eyeWidth, y: 0, width: eyeWidth, height: usedHeight))
         let offset: Float = eyes == 1 ? 0 : Float(i * 2 - 1) * SimRenderer.EYE_OFFSET
         if watching {
-          live.drawEye(encoder, basis, basis[0] * offset, basis[1] * offset, basis[2] * offset, tanHalf, aspect, settings.vr)
+          live.drawEye(encoder, basis, 0, 0, 0, tanHalf, aspect, settings.vr)
         } else {
           world.drawEye(encoder, basis, eye[0] + basis[0] * offset, eye[1] + basis[1] * offset, eye[2] + basis[2] * offset, tanHalf, aspect)
         }

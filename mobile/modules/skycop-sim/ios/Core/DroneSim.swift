@@ -78,6 +78,8 @@ final class DroneSim {
   private(set) var obstacle = Float.greatestFiniteMagnitude
   var yawSensitivity: Float = 1
   var windEnabled = true
+  /// Gustier in the monsoon rain (Environment.gust).
+  var windScale: Float = 1
   var impact: Float = 0
   private(set) var crashes = 0
   /// Times the battery ran flat in the air.
@@ -450,7 +452,7 @@ final class DroneSim {
 
     var windX: Float = 0, windZ: Float = 0
     if windEnabled && aboveGround > 0.2 {
-      let strength = 0.15 + min(pose.y, 80) * 0.004
+      let strength = (0.15 + min(pose.y, 80) * 0.004) * windScale
       windX = strength * (0.6 + sin(time * 0.7) * 0.3 + sin(time * 2.3) * 0.2)
       windZ = strength * (0.3 + sin(time * 0.43 + 2) * 0.4 + sin(time * 1.7) * 0.15)
     }

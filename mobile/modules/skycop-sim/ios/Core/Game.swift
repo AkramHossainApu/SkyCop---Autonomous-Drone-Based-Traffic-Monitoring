@@ -13,11 +13,11 @@ protocol GameHost: AnyObject {
 }
 
 enum MenuItem: Int, CaseIterable {
-  case resume, exit, map, layout, controls, calibrate, defaultMapping, sensitivity, deadzone, invertClimb, invertLook
+  case resume, exit, map, time, weather, layout, controls, calibrate, defaultMapping, sensitivity, deadzone, invertClimb, invertLook
   case vr, head, lens, spacing, comfort, shadows, wind, sound, restart
 
   var label: String {
-    ["RESUME FLIGHT", "EXIT SIMULATION", "MAP", "CONTROL LAYOUT", "SHOW CONTROLS", "CALIBRATE CONTROLLER", "RESET CONTROLLER MAPPING",
+    ["RESUME FLIGHT", "EXIT SIMULATION", "MAP", "TIME OF DAY", "WEATHER", "CONTROL LAYOUT", "SHOW CONTROLS", "CALIBRATE CONTROLLER", "RESET CONTROLLER MAPPING",
      "TURN SENSITIVITY", "STICK DEADZONE", "INVERT CLIMB STICK", "INVERT CAMERA TILT", "DISPLAY", "HEAD TRACKING",
      "LENS CORRECTION", "LENS SPACING", "COMFORT VIGNETTE", "SHADOWS", "WIND", "ROTOR SOUND", "RESTART FLIGHT"][rawValue]
   }
@@ -32,6 +32,8 @@ final class Game {
   var liveAvailable: Bool
   let traffic: Traffic
   let drone: DroneSim
+  let environment = Environment()
+  let pedestrians: Pedestrians
   let camera: CameraRig
   let calibration = Calibration()
   let menu = MenuItem.allCases
@@ -47,8 +49,8 @@ final class Game {
   private(set) var watchingLive = false
   /// Set by the renderer: a frame of live video has arrived.
   var liveHasVideo = false
-  /// Head orientation for the live screen, which is fixed in the room.
-  private(set) var liveBasis: [Float] = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+  /// The live picture is fixed to the view, not the room: no head tracking, always straight ahead.
+  let liveBasis: [Float] = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
   private(set) var liveSince: Float = 0
 
   private let input = PilotInput()
@@ -66,6 +68,7 @@ final class Game {
     self.host = host
     self.liveAvailable = liveAvailable
     traffic = Traffic(city: city)
+    pedestrians = Pedestrians(city: city)
     drone = DroneSim(city: city, traffic: traffic)
     camera = CameraRig(city: city)
   }
@@ -94,9 +97,9 @@ final class Game {
     case .controls: if pressed & (Button.A | Button.B | Button.START) != 0 { screen = .menu }
     case .calibration: calibrate(dt, pressed, mapping, raw)
     }
-    if watchingLive { liveBasis = head }
     if screen == .flight && !watchingLive {
       traffic.update(dt)
+      pedestrians.update(dt)
       propellerAngle = fmodf(propellerAngle + drone.render.rotor * 31 * dt, 2 * PI_F)
     }
     camera.update(screen == .flight ? dt : 0, drone.render, settings.vr, tracked, head)
@@ -161,6 +164,8 @@ final class Game {
 
     drone.yawSensitivity = Float(settings.sensitivity) / 100
     drone.windEnabled = settings.wind
+    environment.update(dt, settings)
+    drone.windScale = environment.gust
     let before = drone.phase
     if pressed & Button.A != 0 {
       if drone.phase == .landed && !drone.canTakeOff { show("BATTERY EMPTY - LET IT CHARGE ON A DOCK") }
@@ -270,6 +275,8 @@ final class Game {
       host?.settingsChanged()
       host?.mapChanged()
       return
+    case .time: s.timeOfDay = cycle(s.timeOfDay, by, 0, Environment.TIMES.count - 1)
+    case .weather: s.weather = cycle(s.weather, by, 0, Environment.WEATHERS.count - 1)
     case .sensitivity: s.sensitivity = cycle(s.sensitivity, by * 10, 50, 150)
     case .deadzone: s.deadzone = cycle(s.deadzone, by * 2, 4, 30)
     case .spacing: s.lensSpacing = cycle(s.lensSpacing, by * 2, -10, 10)

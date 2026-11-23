@@ -39,5 +39,6 @@ internal class QualityLevel(val detailRange: Float, val shadowDetailRange: Float
 internal val QUALITY_LEVELS = arrayOf(
     QualityLevel(210f, 120f, 300f, true, true),
     QualityLevel(125f, 55f, 210f, true, true),
-    QualityLevel(90f, 0f, 150f, false, false),
+    // The lowest level still keeps shadows and surface detail: without them the city looks like a cartoon.
+    QualityLevel(95f, 25f, 150f, true, true),
 )

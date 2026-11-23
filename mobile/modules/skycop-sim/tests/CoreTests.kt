@@ -381,6 +381,23 @@ private fun headTests() {
     pose.resolve(out, world, 0.004f, 0.004f, 0f, 0.05f, false)
     check("no shimmer at rest", hypot(forward(out)[0], forward(out)[1]) < 0.0001f)
 
+    // Compass-free orientation creeps in heading on a still head; the view must not follow it.
+    val steady = HeadPose()
+    Mat4.pose(world, 0f, 0f, 0f, 0.3f, 0f, 0f)
+    steady.resolve(out, world, 0f, 0f, 0f, 0f, true)
+    for (frame in 1..2000) {
+        Mat4.pose(world, 0f, 0f, 0f, 0.3f + frame * 0.0005f, 0f, 0f)
+        steady.resolve(out, world, 0.004f, 0.003f, 0.002f, 0f, false)
+    }
+    near("still head does not drift", forward(out)[0], 0f, 0.002f)
+    // A real turn, with the gyroscope reporting it, still turns the view one to one.
+    for (frame in 1..60) {
+        Mat4.pose(world, 0f, 0f, 0f, 1.3f + frame * 0.01f, 0f, 0f)
+        steady.resolve(out, world, 0f, -0.6f, 0f, 0f, false)
+    }
+    val turned = atan2(forward(out)[0], -forward(out)[2])
+    near("head turn still follows", turned, 0.6f, 0.02f)
+
     for (pitch in floatArrayOf(1.55f, -1.55f)) {
         Mat4.pose(world, 0f, 0f, 0f, 0.8f, pitch, 0f)
         val fresh = HeadPose()
@@ -462,6 +479,23 @@ private fun pacerTests() {
     near("pacer keeps real time", simulated, real, 0.05f)
 }
 
+/** Jams must clear: after twelve simulated minutes no vehicle may have stood still for more than four. */
+private fun gridlockTests(name: String, city: City) {
+    val t = Traffic(city)
+    val still = FloatArray(t.count)
+    var lastX = t.x.copyOf(); var lastZ = t.z.copyOf()
+    var longest = 0f
+    repeat(12 * 60) {
+        repeat(60) { t.update(1f / 60) }
+        for (c in 0 until t.count) {
+            still[c] = if (hypot(t.x[c] - lastX[c], t.z[c] - lastZ[c]) < 0.05f) still[c] + 1f else 0f
+            longest = max(longest, still[c])
+        }
+        lastX = t.x.copyOf(); lastZ = t.z.copyOf()
+    }
+    check("$name traffic never locks up", longest < 240f, "longest wait ${longest}s")
+}
+
 fun main() {
     mappingTests()
     flightTests()
@@ -469,7 +503,9 @@ fun main() {
     val other = City(loadMap("mohammadpur"))
     check("mohammadpur builds", other.chunks.sumOf { it.mesh.vertices } > 100000 && other.dockCount > 50)
     trafficTests("mohammadpur", Traffic(other))
-    println("mohammadpur: ${other.chunks.sumOf { it.mesh.vertices }} + ${other.chunks.sumOf { it.detail.vertices }} detail vertices, tallest ${other.tallest} m")
+    gridlockTests("bashundhara", city)
+    gridlockTests("mohammadpur", other)
+    println("mohammadpur: ${other.chunks.sumOf { it.mesh.vertices }} + ${other.chunks.sumOf { it.detail.vertices }} detail + ${other.chunks.sumOf { it.shade.vertices }} shade vertices, tallest ${other.tallest} m")
     headTests()
     smoothnessTests()
     textureTests()

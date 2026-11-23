@@ -3,6 +3,7 @@ import { Camera, CameraOff, Check, Copy, RefreshCw, Smartphone } from 'lucide-re
 import { useCameraBroadcast, type BroadcastStatus } from './useCameraBroadcast';
 import { isCode, newCode, normalizeCode } from './pairing';
 import { encodeQr } from './qr';
+import { landscapeStream } from './landscape';
 
 type Facing = 'environment' | 'user';
 type Quality = '720' | '1080';
@@ -119,7 +120,8 @@ function Station() {
         audio: false,
         video: { facingMode: { ideal: facing }, height: { ideal: height }, width: { ideal: (height * 16) / 9 }, frameRate: { ideal: 30 } },
       });
-      setStream(media);
+      // The headset gets a landscape (or square) picture even when this phone is held upright.
+      setStream(landscapeStream(media));
       broadcast.note('Camera on');
     } catch (error) {
       const name = error instanceof DOMException ? error.name : '';
