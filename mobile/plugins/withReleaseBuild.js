@@ -1,11 +1,7 @@
-const { withAndroidManifest, withGradleProperties } = require('@expo/config-plugins');
+const { withGradleProperties } = require('@expo/config-plugins');
 
+// Keeps R8 minification off for release builds.
 module.exports = function withReleaseBuild(config) {
-  config = withAndroidManifest(config, (manifestConfig) => {
-    const application = manifestConfig.modResults.manifest.application?.[0];
-    if (application) application.$['android:usesCleartextTraffic'] = 'true';
-    return manifestConfig;
-  });
   return withGradleProperties(config, (config) => {
     const minifyProperty = config.modResults.find(
       (property) => property.type === 'property' && property.key === 'android.enableMinifyInReleaseBuilds',

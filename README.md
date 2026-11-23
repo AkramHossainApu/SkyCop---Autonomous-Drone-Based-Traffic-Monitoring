@@ -1,12 +1,24 @@
 # SkyCop
 
-SkyCop previews a website device's camera and provides a native Android viewer for a direct, same-network WebRTC connection.
+SkyCop streams a live drone camera from a web page to the SkyCop phone app, which shows it side by side for a VR headset. The app also contains a VR flight simulation of the drone over a city with live traffic. The app runs on Android and iOS.
 
-## Android flight simulation
+## How it works
 
-The detailed city simulation runs in the Android app, not the website. Tap **OPEN 3D VR SIMULATION** in the app to enter landscape stereo mode. A connected standard Bluetooth controller uses the left stick for drone yaw/throttle, the right stick for independent camera look, and the triggers for altitude. The simulation streams nearby city sectors, includes traffic lights and collision bounds, and queues cars at signals. Tap the screen to reveal the temporary HUD; tap **EXIT** to return to the receiver. When a live feed is connected, gamepad **X** switches between simulation and headset video without showing the transition HUD.
+1. On the device with the camera, open the SkyCop website (GitHub Pages) and tap **Start camera**. The page shows a pairing code and a QR code.
+2. On the phone, scan the QR code with the camera app, or open SkyCop and type the code.
+3. When the preview says **Live**, tap **Watch in VR** and put the phone in the headset.
 
-## Run locally
+Both devices must be on the same Wi-Fi. Nothing has to run on a computer.
+
+GitHub Pages is HTTPS, so the page cannot talk to a phone on the local network directly. The two sides exchange their WebRTC connection details once through [ntfy.sh](https://ntfy.sh), a free public message relay. Every message is encrypted with AES-256-GCM using a key derived from the pairing code, so the relay sees only ciphertext. The video goes directly between the two devices. One phone watches at a time; a second phone with the same code connects when the first one leaves. The page and the app keep the same code between sessions, and the app reconnects to it by itself when opened; **New code** on the page makes another one. Treat the code like a password: anyone with it on the same network can watch the feed.
+
+Guest Wi-Fi, client isolation and some firewalls block device-to-device connections even on one network. There is no TURN relay. The page offers one Google STUN server for the few networks where that helps.
+
+## Flight simulation
+
+Tap **Open** next to Flight simulation in the app. It is a native engine (Kotlin + OpenGL ES on Android, Swift + Metal on iOS) with 250 Hz flight physics, head tracking, gamepad support, and procedurally painted textures. When a live feed is connected, gamepad **X** switches between the simulation and the live video. See [mobile/README.md](mobile/README.md#flight-simulation) for the controls.
+
+## Run the website locally
 
 Install Node.js 20.19+ or 22.12+, then from this folder:
 
@@ -15,30 +27,10 @@ npm install
 npm run dev
 ```
 
-Open the localhost URL printed by Vite and allow camera access. `getUserMedia` is available on localhost and HTTPS origins; opening the page directly as a file will not work. Use **Start local preview** to request camera access and **Stop preview** to release it.
+Open the printed localhost URL and allow camera access. The camera needs localhost or HTTPS; opening the file directly will not work. The QR code points at the page's own address, so for a phone to use the QR code the page must be served from an address the phone can open (GitHub Pages). Typing the code works from anywhere.
 
-## Connect Android
+## Deploy
 
-First start the signaling host on your Mac from the repository root:
+Select **GitHub Actions** under **Settings > Pages > Build and deployment**. The workflow builds and deploys every push to `main`.
 
-```sh
-npm ci --prefix signaling-server
-npm run signaling
-```
-
-Start the website with `npm run dev`, then start its camera and select **Connect Android viewer**. On a physical phone on the same Wi-Fi, use `ws://MAC_LAN_IP:8787` as the website's signaling address. Copy the invitation and open it on Android, or paste it into the app's meeting code field, then tap **Join camera**. For the Android emulator, use the displayed meeting code and enter `ws://10.0.2.2:8787` in the app instead, since the website's localhost address refers to a different device. Keep the host running throughout the session.
-
-Meeting codes grant access to the camera feed. Share them privately. The host relays connection information, not video. Video is a direct WebRTC connection with no TURN server; guest Wi-Fi, client isolation, firewalls, and some device/browser combinations can prevent a connection even on the same network.
-
-## GitHub Pages testing with your Mac
-
-GitHub Pages is HTTPS and cannot use the Mac's unsecured `ws://` LAN address. For temporary testing without router port forwarding:
-
-1. Install Node.js, npm, and Cloudflare's tunnel client (`brew install cloudflared`) on the Mac.
-2. Run `./start-skycop-host.command` from the repository root and leave it running. It opens the website with the current tunnel address filled in and prints the website link in the terminal.
-3. Start the website camera, select **Connect Android viewer**, and copy its invitation.
-4. Send the invitation privately to Android. Open the link in the app, or paste it into the app's meeting code field, and tap **Join camera**.
-
-Both devices should be on the same Wi-Fi and able to connect directly for video. This tunnel is publicly reachable, has no uptime guarantee, and gets a new address when restarted. Meeting codes and addresses should be shared privately. The signaling host has no user accounts and is not production-hardened; stop it with Ctrl+C when finished. No TURN relay is included, so client isolation or a firewall can still block video.
-
-Select **GitHub Actions** under **Settings > Pages > Build and deployment**. The workflow deploys pushes to `main`; the launch-link and invitation features require this version of the website to be deployed and the updated Android APK installed. The runtime signaling field allows a new tunnel address without redeploying; the optional `VITE_SIGNALING_URL` repository variable can provide a default for a stable endpoint. For a fork, set `ALLOWED_ORIGINS` to the exact Pages origin plus local development origins and `SKYCOP_SITE_URL` to the fork's Pages URL before starting the launcher. See [mobile/README.md](mobile/README.md) for Android installation.
+See [mobile/README.md](mobile/README.md) for building and installing the Android and iOS apps.

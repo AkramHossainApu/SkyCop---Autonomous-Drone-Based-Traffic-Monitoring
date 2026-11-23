@@ -6,7 +6,7 @@
     "scheme": "skycop",
     "orientation": "default",
     "icon": "./assets/icon.png",
-    "userInterfaceStyle": "light",
+    "userInterfaceStyle": "dark",
     "platforms": [
       "ios",
       "android"
@@ -23,7 +23,14 @@
       "expo-asset"
     ],
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "requireFullScreen": true,
+      "bundleIdentifier": "com.skycop.trafficmonitoring",
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "SkyCop receives the live camera video directly from the SkyCop website on your local network.",
+        "ITSAppUsesNonExemptEncryption": false,
+        "CADisableMinimumFrameDurationOnPhone": true
+      }
     },
     "android": {
       "package": "com.skycop.trafficmonitoring",

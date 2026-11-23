@@ -1,0 +1,12 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <!-- Controller rumble. -->
+  <uses-permission android:name="android.permission.VIBRATE" />
+  <application>
+    <activity
+      android:name="com.skycop.sim.SimulationActivity"
+      android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize|screenLayout|smallestScreenSize|uiMode|density"
+      android:exported="false"
+      android:screenOrientation="sensorLandscape"
+      android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen" />
+  </application>
+</manifest>

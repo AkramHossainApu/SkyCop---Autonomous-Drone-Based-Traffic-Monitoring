@@ -2,903 +2,355 @@ import 'react-native-url-polyfill/auto';
 import { StatusBar } from 'expo-status-bar';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import { setVisibilityAsync } from 'expo-navigation-bar';
-import { useGamepad } from 'react-native-earl-gamepad';
 import { useEffect, useRef, useState } from 'react';
-import { Image, Linking, Platform, Pressable, SafeAreaView, ScrollView, StatusBar as NativeStatusBar, StyleSheet, Text, TextInput, View } from 'react-native';
-import type { MediaStream } from './webrtc';
-import FlightSimulation, { type FlightControls } from './FlightSimulation';
+import { Image, Linking, Platform, Pressable, ScrollView, StatusBar as NativeStatusBar, StyleSheet, Text, TextInput, View } from 'react-native';
+import SkyCopSim, { type ControllerButton } from './modules/skycop-sim';
 import RemoteVideo from './RemoteVideo';
-import { RTCPeerConnection, RTCSessionDescription } from './webrtc';
+import { CODE_PATTERN, formatTyping, normalizeCode } from './pairing';
+import { useCameraLink, type LinkStatus } from './useCameraLink';
 
-type ConnectionStatus = 'disconnected' | 'connecting' | 'waiting' | 'connected' | 'error';
+const CODE_KEY = 'pairing-code';
 
-function parseInvitation(value: string): { server: string; code: string } | null {
-  try {
-    const invitation = new URL(value.trim());
-    if (invitation.protocol !== 'skycop:' || invitation.hostname !== 'join') return null;
-    const server = invitation.searchParams.get('server');
-    const code = invitation.searchParams.get('code')?.toLowerCase();
-    if (!server || !code || !/^[a-hjkmnp-z2-9]{3}(-[a-hjkmnp-z2-9]{3}){2}$/.test(code)) return null;
-    const endpoint = new URL(server);
-    if (!['ws:', 'wss:'].includes(endpoint.protocol) || endpoint.username || endpoint.password) return null;
-    return { server: endpoint.toString(), code };
-  } catch {
-    return null;
-  }
-}
+const color = {
+  ground: '#171719',
+  surface: '#131217',
+  raised: '#212023',
+  border: '#2a2a2e',
+  control: '#3a3a3e',
+  text: '#ffffff',
+  muted: '#a3a5ab',
+  faint: '#8a8c92',
+  accent: '#4a8ad6',
+  positive: '#5fc39c',
+  positiveBg: '#1b2828',
+  warning: '#d9a441',
+  negative: '#f0788c',
+  negativeBg: '#2c1a20',
+};
 
-function waitForIceGathering(peer: RTCPeerConnection): Promise<void> {
-  if (peer.iceGatheringState === 'complete') return Promise.resolve();
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      peer.onicegatheringstatechange = null;
-      reject(new Error('Network candidate gathering timed out. Try again.'));
-    }, 15000);
-    peer.onicegatheringstatechange = () => {
-      if (peer.iceGatheringState !== 'complete') return;
-      clearTimeout(timer);
-      peer.onicegatheringstatechange = null;
-      resolve();
-    };
-    if (peer.iceGatheringState === 'complete') {
-      clearTimeout(timer);
-      peer.onicegatheringstatechange = null;
-      resolve();
-    }
-  });
+const STATUS: Record<LinkStatus, { label: string; dot: string }> = {
+  idle: { label: 'Not connected', dot: color.faint },
+  searching: { label: 'Looking for the camera', dot: color.warning },
+  connecting: { label: 'Connecting', dot: color.warning },
+  live: { label: 'Live', dot: color.positive },
+  error: { label: 'Pairing failed', dot: color.negative },
+};
+
+async function lock(orientation: ScreenOrientation.OrientationLock) {
+  await ScreenOrientation.lockAsync(orientation).catch(() => undefined);
 }
 
 export default function App() {
-  const [meetingCode, setMeetingCode] = useState('');
-  const [serverAddress, setServerAddress] = useState(process.env.EXPO_PUBLIC_SIGNALING_URL || 'ws://10.0.2.2:8787');
-  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('disconnected');
-  const [remoteVideoStream, setRemoteVideoStream] = useState<unknown>(null);
-  const [connectionError, setConnectionError] = useState('');
-  const [isVrMode, setIsVrMode] = useState(false);
-  const [screen, setScreen] = useState<'receiver' | 'simulation'>('receiver');
-  const [vrHudVisible, setVrHudVisible] = useState(true);
-  const [vrHudPulse, setVrHudPulse] = useState(0);
-  const [simulationStartHidden, setSimulationStartHidden] = useState(false);
-  const peerRef = useRef<RTCPeerConnection | null>(null);
-  const socketRef = useRef<WebSocket | null>(null);
-  const previousXRef = useRef(false);
-  const gamepad = useGamepad({ axisThreshold: 0.12 });
-  const flightControls: FlightControls = {
-    yaw: gamepad.axes.leftX ?? 0,
-    throttle: gamepad.axes.leftY ?? 0,
-    lookX: gamepad.axes.rightX ?? 0,
-    lookY: gamepad.axes.rightY ?? 0,
-    climb: (gamepad.buttonValues.rt ?? 0) - (gamepad.buttonValues.lt ?? 0),
-  };
-  useEffect(() => {
-    void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => undefined);
-    return () => {
-      void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => undefined);
-      void setVisibilityAsync('visible').catch(() => undefined);
-    };
-  }, []);
-  useEffect(() => {
-    const pressed = gamepad.isPressed('x');
-    if (pressed && !previousXRef.current) {
-      if (screen === 'simulation') {
-        if (connectionStatus === 'connected' && remoteVideoStream) {
-          setScreen('receiver');
-          setIsVrMode(true);
-          setVrHudVisible(false);
-          void setVisibilityAsync('hidden').catch(() => undefined);
-        }
-      } else if (remoteVideoStream && connectionStatus === 'connected') {
-        setSimulationStartHidden(true);
-        void enterSimulation(true);
-      }
-    }
-    previousXRef.current = pressed;
-  }, [gamepad.pressedButtons, screen, connectionStatus, remoteVideoStream]);
-  useEffect(() => {
-    if (!isVrMode || !vrHudVisible) return undefined;
-    const timeout = setTimeout(() => setVrHudVisible(false), 3500);
-    return () => clearTimeout(timeout);
-  }, [isVrMode, vrHudVisible, vrHudPulse]);
-  useEffect(() => {
-    let active = true;
-    function receiveInvitation(url: string) {
-      if (!active) return;
-      if (socketRef.current) {
-        setConnectionError('Disconnect from the current camera before opening another invitation.');
-        return;
-      }
-      const invitation = parseInvitation(url);
-      if (!invitation) {
-        setConnectionError('Invalid SkyCop invitation. Ask the website to copy a new one.');
-        return;
-      }
-      setMeetingCode(invitation.code);
-      setServerAddress(invitation.server);
-      setConnectionError('');
-      setConnectionStatus('disconnected');
-    }
-    const subscription = Linking.addEventListener('url', (event) => receiveInvitation(event.url));
-    void Linking.getInitialURL().then((url) => { if (url) receiveInvitation(url); }).catch(() => {
-      if (active) setConnectionError('Could not open the SkyCop invitation.');
-    });
-    return () => { active = false; subscription.remove(); };
-  }, []);
-  useEffect(() => () => {
-    socketRef.current?.close();
-    socketRef.current = null;
-    peerRef.current?.close();
-    peerRef.current = null;
-  }, []);
+  const link = useCameraLink();
+  const [typed, setTyped] = useState(() => SkyCopSim?.loadValue(CODE_KEY) ?? '');
+  const [vr, setVr] = useState(false);
+  const [hint, setHint] = useState(true);
+  const [notice, setNotice] = useState('');
+  const simulationOpen = useRef(false);
+  const leaveRect = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
+  const hintShownAt = useRef(0);
+  const live = link.status === 'live' && link.stream !== null;
+  const liveRef = useRef(live);
+  liveRef.current = live;
+  const codeValid = CODE_PATTERN.test(typed);
 
-  function disconnect() {
-    const socket = socketRef.current;
-    socketRef.current = null;
-    socket?.close();
-    const peer = peerRef.current;
-    peerRef.current = null;
-    peer?.close();
-    setRemoteVideoStream(null);
-    setConnectionError('');
-    setConnectionStatus('disconnected');
-  }
-
-  async function enterVrMode(quiet = false) {
-    if (!remoteVideoStream) return;
-    try {
-      await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE);
-      setIsVrMode(true);
-      setVrHudVisible(!quiet);
-      void setVisibilityAsync('hidden').catch(() => undefined);
-    } catch {
-      setConnectionError('Could not rotate the viewer. Check that the device allows screen rotation.');
-    }
-  }
-
-  async function exitVrMode() {
-    setIsVrMode(false);
-    void setVisibilityAsync('visible').catch(() => undefined);
-    try {
-      await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
-    } catch {
-      setConnectionError('Could not restore portrait orientation. Rotate the device manually.');
-    }
-  }
-
-  async function enterSimulation(quiet = false) {
-    setIsVrMode(false);
-    setSimulationStartHidden(quiet);
-    setScreen('simulation');
-    void setVisibilityAsync('hidden').catch(() => undefined);
-    try {
-      await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE);
-    } catch {
-      setScreen('receiver');
-      void setVisibilityAsync('visible').catch(() => undefined);
-      setConnectionError('Could not rotate to landscape. Check that the device allows screen rotation.');
-    }
-  }
-
-  async function exitSimulation() {
-    setScreen('receiver');
-    await setVisibilityAsync('visible').catch(() => undefined);
-    await ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => undefined);
-  }
-
-  async function acceptOffer(socket: WebSocket, sdp: string) {
-    if (socketRef.current !== socket) return;
-    peerRef.current?.close();
-    const peer = new RTCPeerConnection({ iceServers: [] });
-    peerRef.current = peer;
-    try {
-      peer.ontrack = (event) => {
-        const [stream] = (event as unknown as { streams: MediaStream[] }).streams;
-        if (stream && peerRef.current === peer) setRemoteVideoStream(stream);
-      };
-      peer.onconnectionstatechange = () => {
-        if (peerRef.current !== peer) return;
-        if (peer.connectionState === 'connected') setConnectionStatus('connected');
-        if (peer.connectionState === 'failed' || peer.connectionState === 'disconnected') {
-          setConnectionStatus('error');
-          setConnectionError('Connection lost. Start a new session and check your network.');
-        }
-      };
-      await peer.setRemoteDescription(new RTCSessionDescription({ type: 'offer', sdp }));
-      await peer.setLocalDescription(await peer.createAnswer());
-      await waitForIceGathering(peer);
-      if (peerRef.current !== peer || socketRef.current !== socket || socket.readyState !== WebSocket.OPEN) return;
-      if (!peer.localDescription?.sdp) throw new Error('Could not create an answer.');
-      socket.send(JSON.stringify({ type: 'answer', sdp: peer.localDescription.sdp }));
-    } catch {
-      if (peerRef.current !== peer) return;
-      peerRef.current = null;
-      peer.close();
-      setConnectionError('Could not negotiate a video connection. Start a new session.');
-      setConnectionStatus('error');
-    }
-  }
-
-  function connectToWebsite() {
-    if (socketRef.current) return;
-    const code = meetingCode.trim().toLowerCase();
-    if (!/^[a-hjkmnp-z2-9]{3}(-[a-hjkmnp-z2-9]{3}){2}$/.test(code)) {
-      setConnectionError('Enter the meeting code shown on the website.');
-      setConnectionStatus('error');
+  function join(code: string) {
+    const normalized = normalizeCode(code);
+    if (!CODE_PATTERN.test(normalized)) {
+      setNotice('That code does not look right. It has nine letters and numbers, like abc-def-ghj.');
       return;
     }
-    setConnectionError('');
-    setConnectionStatus('connecting');
+    setNotice('');
+    setTyped(normalized);
+    SkyCopSim?.saveValue(CODE_KEY, normalized);
+    link.connect(normalized);
+  }
+
+  // Scanning the website's QR code opens skycop://join?code=... and connects straight away.
+  useEffect(() => {
+    const open = (url: string | null | undefined) => { if (url && /code=|join=/.test(url)) join(url); };
+    const subscription = Linking.addEventListener('url', (event) => open(event.url));
+    void Linking.getInitialURL().then(open).catch(() => undefined);
+    return () => subscription.remove();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    void lock(ScreenOrientation.OrientationLock.PORTRAIT_UP);
+    // Rejoin the last camera straight away; a scanned link replaces it if one opened the app.
+    const saved = SkyCopSim?.loadValue(CODE_KEY);
+    if (saved && CODE_PATTERN.test(saved)) link.connect(saved);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function enterVr() {
+    if (!liveRef.current) return;
+    await lock(ScreenOrientation.OrientationLock.LANDSCAPE);
+    setVr(true);
+    setHint(true);
+    void setVisibilityAsync('hidden').catch(() => undefined);
+  }
+
+  async function exitVr() {
+    setVr(false);
+    void setVisibilityAsync('visible').catch(() => undefined);
+    await lock(ScreenOrientation.OrientationLock.PORTRAIT_UP);
+  }
+
+  async function openSimulation() {
+    if (!SkyCopSim || simulationOpen.current) return;
+    simulationOpen.current = true;
+    setNotice('');
     try {
-      const url = new URL(serverAddress.trim());
-      if (!['ws:', 'wss:'].includes(url.protocol)) throw new Error('Enter a ws:// or wss:// signaling address.');
-      const socket = new WebSocket(url.toString());
-      socketRef.current = socket;
-      let opened = false;
-      let serverError = '';
-      socket.onopen = () => {
-        opened = true;
-        socket.send(JSON.stringify({ type: 'join', code }));
-      };
-      socket.onmessage = (event) => {
-        try {
-          const message = JSON.parse(String(event.data)) as { type: string; sdp?: string; message?: string };
-          if (message.type === 'joined') setConnectionStatus('connecting');
-          else if (message.type === 'offer' && message.sdp) void acceptOffer(socket, message.sdp);
-          else if (message.type === 'error') {
-            serverError = message.message ?? 'Could not join the meeting.';
-            setConnectionError(serverError);
-            setConnectionStatus('error');
-          } else if (message.type === 'peer-left') {
-            serverError = 'The website stopped sharing.';
-            setConnectionError(serverError);
-            setConnectionStatus('error');
-          }
-        } catch {
-          setConnectionError('Invalid response from the signaling host.');
-          setConnectionStatus('error');
-        }
-      };
-      socket.onerror = () => {
-        if (socketRef.current === socket) {
-          setConnectionError('Cannot reach the signaling host. Check the address and server.');
-          setConnectionStatus('error');
-        }
-      };
-      socket.onclose = (event) => {
-        if (socketRef.current !== socket) return;
-        socketRef.current = null;
-        peerRef.current?.close();
-        peerRef.current = null;
-        setRemoteVideoStream(null);
-        setConnectionStatus('error');
-        setConnectionError(serverError || (event.code === 1008
-          ? 'The host rejected the connection. Wait a minute or ask the host to check its settings.'
-          : opened
-            ? 'The host or tunnel stopped. Ask for a new invitation.'
-            : 'Cannot reach the host. Ask for a new invitation and check the connection.'));
-      };
-    } catch (caught) {
-      setConnectionError(caught instanceof Error ? caught.message : 'Invalid signaling address.');
-      setConnectionStatus('error');
+      // iOS only rotates a presented screen when the app itself allows landscape.
+      if (Platform.OS === 'ios') await ScreenOrientation.unlockAsync().catch(() => undefined);
+      const result = await SkyCopSim.openSimulation(liveRef.current);
+      if (result === 'live' && liveRef.current) {
+        await enterVr();
+        return;
+      }
+      await exitVr();
+      if (result === 'error') setNotice('The 3D simulation could not start its graphics on this device.');
+    } catch {
+      await exitVr();
+      setNotice('Could not open the simulation. Try again.');
+    } finally {
+      simulationOpen.current = false;
     }
   }
 
-  const isConnected = connectionStatus === 'connected';
-  const statusLabel = isConnected ? 'LIVE' : connectionStatus === 'connecting' ? 'CONNECTING' : connectionStatus === 'error' ? 'CONNECTION ERROR' : connectionStatus === 'waiting' ? 'WAITING FOR SENDER' : 'SYSTEM READY';
-  const feedLabel = isConnected ? 'LIVE' : connectionStatus === 'waiting' ? 'WAITING' : 'NO SIGNAL';
+  // Gamepad X switches between live video and the simulation; B leaves the headset view.
+  const buttonRef = useRef<(button: ControllerButton) => void>(() => undefined);
+  buttonRef.current = (button) => {
+    if (button === 'x') void openSimulation();
+    if (button === 'b' && vr) void exitVr();
+  };
+  useEffect(() => {
+    if (!SkyCopSim) return undefined;
+    const subscription = SkyCopSim.addListener('onControllerButton', ({ button }) => buttonRef.current(button));
+    void SkyCopSim.watchControllerButtons().catch(() => undefined);
+    return () => subscription.remove();
+  }, []);
 
-  if (screen === 'simulation') return (
-    <View style={styles.appRoot}>
-      <View pointerEvents="none" style={styles.gamepadLayer}>{gamepad.bridge}</View>
-      <FlightSimulation onExit={() => void exitSimulation()} controls={flightControls} startHidden={simulationStartHidden} />
-    </View>
-  );
+  useEffect(() => {
+    if (!vr || !hint) return undefined;
+    const timer = setTimeout(() => setHint(false), 3500);
+    return () => clearTimeout(timer);
+  }, [vr, hint]);
 
-  if (isVrMode && remoteVideoStream) {
+  useEffect(() => {
+    if (vr && !live) void exitVr();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [live]);
+
+  if (vr && link.stream) {
     return (
-      <View style={styles.appRoot}>
-        <View pointerEvents="none" style={styles.gamepadLayer}>{gamepad.bridge}</View>
-        <View style={styles.vrRoot} onTouchStart={() => { setVrHudVisible(true); setVrHudPulse((pulse) => pulse + 1); }}>
-          <StatusBar hidden />
-          <View style={styles.vrEyes}>
-            <View style={styles.vrEye}><RemoteVideo stream={remoteVideoStream} /></View>
-            <View style={styles.vrEye}><RemoteVideo stream={remoteVideoStream} /></View>
-            <View pointerEvents="none" style={styles.vrDivider} />
+      <View
+        style={styles.vr}
+        onTouchStart={() => {
+          if (!hint) hintShownAt.current = Date.now();
+          setHint(true);
+        }}
+        onTouchEnd={(event) => {
+          // Hit-test the button here as well: on iOS the native video layers can keep a landscape
+          // Pressable from receiving the press.
+          const rect = leaveRect.current;
+          const { pageX, pageY } = event.nativeEvent;
+          if (hint && rect && Date.now() - hintShownAt.current > 250 &&
+            pageX >= rect.x && pageX <= rect.x + rect.width && pageY >= rect.y && pageY <= rect.y + rect.height) {
+            void exitVr();
+          }
+        }}
+      >
+        <StatusBar hidden />
+        {/* Native video views would otherwise take the touches meant for the controls. */}
+        <View style={styles.vrEye} pointerEvents="none"><RemoteVideo stream={link.stream} fit="contain" /></View>
+        <View style={styles.vrDivider} pointerEvents="none" />
+        <View style={styles.vrEye} pointerEvents="none"><RemoteVideo stream={link.stream} fit="contain" /></View>
+        {hint && (
+          <View style={styles.vrHint} pointerEvents="box-none">
+            <Text style={styles.vrHintText}>Gamepad X: simulation · B: leave</Text>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => void exitVr()}
+              onLayout={(event) => {
+                const target = event.target as unknown as { measureInWindow?: (callback: (x: number, y: number, w: number, h: number) => void) => void };
+                target.measureInWindow?.((x, y, width, height) => { leaveRect.current = { x, y, width, height }; });
+              }}
+              style={styles.vrExit}
+            >
+              <Text style={styles.vrExitText}>Leave VR</Text>
+            </Pressable>
           </View>
-          {vrHudVisible && <Pressable accessibilityRole="button" accessibilityLabel="Exit VR full-screen view" onPress={() => void exitVrMode()} style={styles.vrExitButton}>
-            <Text style={styles.vrExitText}>EXIT VR</Text>
-          </Pressable>}
-        </View>
+        )}
       </View>
     );
   }
 
+  const status = STATUS[link.status];
+  const finding = live
+    ? 'The camera is streaming. Put the phone in the headset to watch.'
+    : link.status === 'searching'
+      ? `Waiting for the camera station with code ${link.code}. Start its camera if it is off.`
+      : link.status === 'connecting'
+        ? 'Found the camera. Setting up the video.'
+        : 'Type the code from the SkyCop website, or scan its QR code with this phone.';
+
   return (
-    <View style={styles.appRoot}>
-      <View pointerEvents="none" style={styles.gamepadLayer}>{gamepad.bridge}</View>
-      <SafeAreaView style={styles.safeArea}>
-        <StatusBar style="dark" />
-        <ScrollView contentContainerStyle={styles.content}>
+    <View style={styles.root}>
+      <StatusBar style="light" />
+      <ScrollView contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
         <View style={styles.topbar}>
           <View style={styles.brand}>
-            <Image source={require('./assets/skycop-logo.png')} style={styles.brandLogo} resizeMode="contain" />
-            <Text style={styles.brandName}>SKYCOP<Text style={styles.brandPeriod}>.</Text></Text>
+            <Image source={require('./assets/skycop-logo.png')} style={styles.logo} resizeMode="contain" />
+            <Text style={styles.brandName}>SkyCop</Text>
           </View>
-          <View style={styles.systemStatus}>
-            <View style={[styles.statusDot, isConnected && styles.statusDotLive]} />
-            <Text style={styles.systemStatusText}>{statusLabel}</Text>
+          <View style={styles.state}>
+            <View style={[styles.dot, { backgroundColor: status.dot }]} />
+            <Text style={[styles.stateText, live && styles.stateLive]}>{status.label}</Text>
           </View>
         </View>
 
-        <View style={styles.intro}>
-          <View style={styles.eyebrow}>
-            <View style={styles.eyebrowMarker} />
-            <Text style={styles.eyebrowText}>DRONE TRAFFIC CONTROL</Text>
-          </View>
-          <Text style={styles.title}>Autonomous Drone-Based Traffic Monitoring<Text style={styles.titlePeriod}>.</Text></Text>
-          <Text style={styles.subtitle}>VR Police Control</Text>
-          <Pressable accessibilityRole="button" onPress={() => void enterSimulation()} style={({ pressed }) => [styles.simulationButton, pressed && styles.buttonPressed]}>
-            <Text style={styles.simulationButtonText}>OPEN 3D VR SIMULATION</Text>
-          </Pressable>
-        </View>
+        <Text style={styles.h1} accessibilityRole="header">Live camera</Text>
+        <Text style={styles.finding}>{finding}</Text>
 
-        <View style={styles.workspace}>
-          <View style={styles.sectionHeading}>
-            <View>
-              <Text style={styles.sectionKicker}>01 / CAMERA INPUT</Text>
-              <Text style={styles.sectionTitle}>Live camera</Text>
-            </View>
-            <View style={styles.connectionStatus}>
-              <View style={styles.signalDot} />
-              <Text style={styles.connectionText}>{feedLabel}</Text>
-            </View>
+        <View style={styles.panel}>
+          <View style={styles.viewport}>
+            {link.stream ? <RemoteVideo stream={link.stream} fit="cover" /> : (
+              <View style={styles.viewportEmpty}>
+                <Text style={styles.viewportText}>{link.status === 'idle' ? 'No camera connected' : 'Waiting for video…'}</Text>
+              </View>
+            )}
+            {live && <View style={styles.pill}><Text style={styles.pillText}>Live</Text></View>}
           </View>
-
-          <View style={styles.previewFrame}>
-            {remoteVideoStream ? <RemoteVideo stream={remoteVideoStream} /> : <View style={styles.previewGrid} />}
+          <View style={styles.panelFoot}>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Enter VR full-screen view"
-              disabled={!remoteVideoStream}
-              onPress={() => void enterVrMode()}
-              style={({ pressed }) => [styles.vrButton, !remoteVideoStream && styles.vrButtonDisabled, pressed && styles.buttonPressed]}
+              disabled={!live}
+              onPress={() => void enterVr()}
+              style={({ pressed }) => [styles.button, styles.buttonPrimary, !live && styles.disabled, pressed && styles.pressed]}
             >
-              <Text style={styles.vrButtonIcon}>□</Text>
-              <Text style={styles.vrButtonText}>VR FULL SCREEN</Text>
+              <Text style={[styles.buttonText, styles.buttonPrimaryText]}>Watch in VR</Text>
             </Pressable>
-            <View style={styles.previewTopline}>
-              <Text style={styles.feedLabel}>REMOTE CAMERA FEED</Text>
-              <Text style={styles.feedLabel}>{feedLabel}</Text>
-            </View>
-            <View style={styles.previewCenter}>
-              {!remoteVideoStream && (
-                <>
-                  <View style={styles.crosshairOuter}>
-                    <View style={styles.crosshairHorizontal} />
-                    <View style={styles.crosshairVertical} />
-                  </View>
-                  <Text style={styles.emptyTitle}>Connect to website camera</Text>
-                  <Text style={styles.emptyCaption}>Enter the meeting code from the website.</Text>
-                </>
-              )}
-            </View>
-            <View style={styles.frameCornerTopLeft} />
-            <View style={styles.frameCornerTopRight} />
-            <View style={styles.frameCornerBottomLeft} />
-            <View style={styles.frameCornerBottomRight} />
-            <View style={styles.previewBottomline}>
-              <Text style={styles.feedLabel}>SKYCOP WEB STATION</Text>
-              <Text style={styles.feedLabel}>{isConnected ? 'LIVE' : connectionStatus === 'waiting' ? 'WAITING' : 'OFFLINE'}</Text>
-            </View>
           </View>
+        </View>
 
+        <View style={[styles.panel, styles.panelPad]}>
+          <Text style={styles.h2} accessibilityRole="header">Connect to a camera</Text>
+          <Text style={styles.label}>Pairing code</Text>
           <TextInput
-            accessibilityLabel="Meeting code or invitation"
+            accessibilityLabel="Pairing code"
+            value={typed}
+            onChangeText={(value) => setTyped(value.includes('/') || value.includes('=') ? normalizeCode(value) : formatTyping(value))}
+            onSubmitEditing={() => join(typed)}
+            editable={link.status === 'idle' || link.status === 'error'}
             autoCapitalize="none"
             autoCorrect={false}
-            value={meetingCode}
-            onChangeText={(value) => {
-              if (!value.trim().startsWith('skycop://')) {
-                setMeetingCode(value);
-                return;
-              }
-              const invitation = parseInvitation(value);
-              if (!invitation) {
-                setConnectionError('Invalid SkyCop invitation. Ask the website to copy a new one.');
-                return;
-              }
-              setMeetingCode(invitation.code);
-              setServerAddress(invitation.server);
-              setConnectionError('');
-            }}
-            editable={!socketRef.current}
-            placeholder="Meeting code or SkyCop invitation"
-            placeholderTextColor="#89938b"
-            style={styles.serverInput}
+            placeholder="abc-def-ghj"
+            placeholderTextColor={color.faint}
+            returnKeyType="go"
+            style={styles.codeInput}
           />
-          <TextInput
-            accessibilityLabel="Signaling host address"
-            autoCapitalize="none"
-            autoCorrect={false}
-            keyboardType="url"
-            value={serverAddress}
-            onChangeText={setServerAddress}
-            editable={!socketRef.current}
-            placeholder="wss://signal.example.com"
-            placeholderTextColor="#89938b"
-            style={styles.serverInput}
-          />
-          <Pressable
-            accessibilityRole="button"
-            onPress={socketRef.current ? disconnect : connectToWebsite}
-            style={({ pressed }) => [styles.connectButton, socketRef.current && styles.disconnectButton, pressed && styles.buttonPressed]}
-          >
-            <Text style={[styles.connectButtonText, socketRef.current && styles.disconnectButtonText]}>
-              {socketRef.current ? 'Disconnect' : 'Join camera'}
-            </Text>
+          {link.status === 'idle' || link.status === 'error' ? (
+            <Pressable
+              accessibilityRole="button"
+              disabled={!codeValid}
+              onPress={() => join(typed)}
+              style={({ pressed }) => [styles.button, styles.buttonPrimary, styles.wide, !codeValid && styles.disabled, pressed && styles.pressed]}
+            >
+              <Text style={[styles.buttonText, styles.buttonPrimaryText]}>Connect</Text>
+            </Pressable>
+          ) : (
+            <Pressable accessibilityRole="button" onPress={link.disconnect} style={({ pressed }) => [styles.button, styles.wide, pressed && styles.pressed]}>
+              <Text style={styles.buttonText}>Disconnect</Text>
+            </Pressable>
+          )}
+          {(notice || link.error) ? <Text style={styles.error}>{notice || link.error}</Text> : null}
+          <Text style={styles.help}>On the camera device, open the SkyCop website and tap Start camera. Both devices need the same Wi-Fi.</Text>
+        </View>
+
+        <View style={[styles.panel, styles.panelPad, styles.simPanel]}>
+          <View style={styles.simText}>
+            <Text style={styles.h2} accessibilityRole="header">Flight simulation</Text>
+            <Text style={styles.help}>Fly the drone through the city in VR with a gamepad.</Text>
+          </View>
+          <Pressable accessibilityRole="button" onPress={() => void openSimulation()} style={({ pressed }) => [styles.button, pressed && styles.pressed]}>
+            <Text style={styles.buttonText}>Open</Text>
           </Pressable>
-          {connectionError ? <Text style={styles.connectionError}>{connectionError}</Text> : null}
-
-          <View style={styles.infoNote}>
-            <View style={styles.infoMark}><Text style={styles.infoMarkText}>i</Text></View>
-            <Text style={styles.infoText}>This viewer receives the website feed over WebRTC. It never opens this phone's camera.</Text>
-          </View>
         </View>
 
-        <View style={styles.footer}>
-          <Text style={styles.footerLabel}>SKYCOP / LIVE CAMERA</Text>
-          <Text style={styles.footerVersion}>BUILD 0.1.0</Text>
-        </View>
-        </ScrollView>
-      </SafeAreaView>
+        <Text style={styles.footer}>Video goes straight from the camera to this phone. It never uses this phone's camera.</Text>
+      </ScrollView>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  appRoot: {
-    flex: 1,
-    width: '100%',
-    height: '100%',
-    position: 'relative',
-  },
-  gamepadLayer: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    width: 1,
-    height: 1,
-    opacity: 0,
-    zIndex: -1,
-  },
-  safeArea: {
-    flex: 1,
-    width: '100%',
-    height: '100%',
-    backgroundColor: '#f2f4ef',
-  },
-  vrRoot: {
-    flex: 1,
-    backgroundColor: '#000000',
-  },
-  vrEyes: {
-    flex: 1,
-    flexDirection: 'row',
-    backgroundColor: '#000000',
-  },
-  vrEye: {
-    flex: 1,
-    position: 'relative',
-    overflow: 'hidden',
-    backgroundColor: '#000000',
-  },
-  vrDivider: {
-    position: 'absolute',
-    top: 0,
-    bottom: 0,
-    left: '50%',
-    width: 2,
-    marginLeft: -1,
-    backgroundColor: '#000000',
-  },
-  vrExitButton: {
-    position: 'absolute',
-    top: 12,
-    right: 12,
-    minWidth: 68,
-    minHeight: 34,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 10,
-    borderWidth: 1,
-    borderColor: '#ffffff50',
-    backgroundColor: '#111111a8',
-  },
-  vrExitText: {
-    color: '#ffffff',
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 0.6,
-  },
+  root: { flex: 1, backgroundColor: color.ground },
   content: {
-    flexGrow: 1,
+    paddingHorizontal: 16,
+    paddingTop: Platform.OS === 'android' ? (NativeStatusBar.currentHeight ?? 24) + 8 : 60,
+    paddingBottom: 40,
     width: '100%',
-    maxWidth: 760,
+    maxWidth: 640,
     alignSelf: 'center',
-    paddingHorizontal: 24,
-    paddingTop: Platform.OS === 'android' ? (NativeStatusBar.currentHeight ?? 24) + 12 : 12,
-    paddingBottom: 20,
   },
-  topbar: {
-    minHeight: 55,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#dce2da',
-  },
-  brand: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 9,
-  },
-  brandLogo: {
-    width: 44,
-    height: 27,
-  },
-  brandName: {
-    color: '#202a27',
-    fontSize: 14,
+  topbar: { height: 48, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 },
+  brand: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  logo: { width: 34, height: 21, tintColor: '#ffffff' },
+  brandName: { color: color.text, fontSize: 17, fontWeight: '700' },
+  state: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  dot: { width: 8, height: 8, borderRadius: 4 },
+  stateText: { color: color.muted, fontSize: 13 },
+  stateLive: { color: color.text },
+  h1: { color: color.text, fontSize: 26, lineHeight: 32, fontWeight: '700' },
+  finding: { color: color.muted, fontSize: 15, lineHeight: 21, marginTop: 6, marginBottom: 16 },
+  panel: { backgroundColor: color.surface, borderRadius: 6, marginBottom: 16, overflow: 'hidden' },
+  panelPad: { padding: 20 },
+  viewport: { aspectRatio: 16 / 9, backgroundColor: '#0b0b0d' },
+  viewportEmpty: { ...StyleSheet.absoluteFill, alignItems: 'center', justifyContent: 'center' },
+  viewportText: { color: color.faint, fontSize: 14 },
+  pill: { position: 'absolute', top: 12, left: 12, height: 24, paddingHorizontal: 10, borderRadius: 12, backgroundColor: color.positiveBg, justifyContent: 'center' },
+  pillText: { color: color.positive, fontSize: 12, fontWeight: '600' },
+  panelFoot: { padding: 16 },
+  h2: { color: color.text, fontSize: 16, lineHeight: 24, fontWeight: '600' },
+  label: { color: color.faint, fontSize: 12, marginTop: 16, marginBottom: 6 },
+  codeInput: {
+    height: 56,
+    paddingHorizontal: 16,
+    borderRadius: 6,
+    backgroundColor: color.raised,
+    color: color.text,
+    fontSize: 26,
     fontWeight: '700',
-    letterSpacing: 0.8,
+    letterSpacing: 1,
+    fontVariant: ['tabular-nums'],
   },
-  brandPeriod: {
-    color: '#e87654',
-  },
-  systemStatus: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  statusDot: {
-    width: 7,
-    height: 7,
-    borderRadius: 4,
-    backgroundColor: '#6f9c73',
-  },
-  statusDotLive: {
-    backgroundColor: '#6f9c73',
-  },
-  systemStatusText: {
-    color: '#69756e',
-    fontSize: 9,
-    fontWeight: '500',
-    letterSpacing: 0.6,
-  },
-  intro: {
-    paddingTop: 30,
-    paddingBottom: 24,
-  },
-  simulationButton: {
-    alignSelf: 'flex-start',
-    minHeight: 40,
-    justifyContent: 'center',
-    marginTop: 16,
-    paddingHorizontal: 13,
+  button: {
+    height: 44,
+    paddingHorizontal: 20,
+    borderRadius: 22,
     borderWidth: 1,
-    borderColor: '#202a27',
-    backgroundColor: '#202a27',
-  },
-  simulationButtonText: {
-    color: '#f5f5ef',
-    fontSize: 10,
-    fontWeight: '700',
-    letterSpacing: 0.5,
-  },
-  eyebrow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  eyebrowMarker: {
-    width: 7,
-    height: 7,
-    backgroundColor: '#e87654',
-    transform: [{ rotate: '45deg' }],
-  },
-  eyebrowText: {
-    color: '#727d75',
-    fontSize: 9,
-    fontWeight: '500',
-    letterSpacing: 0.6,
-  },
-  title: {
-    marginTop: 15,
-    color: '#202a27',
-    fontSize: 34,
-    fontWeight: '500',
-    lineHeight: 39,
-  },
-  titlePeriod: {
-    color: '#e87654',
-  },
-  subtitle: {
-    marginTop: 8,
-    color: '#727b74',
-    fontSize: 15,
-    fontWeight: '500',
-  },
-  workspace: {
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: '#dce2da',
-    paddingTop: 19,
-  },
-  sectionHeading: {
-    minHeight: 51,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-  },
-  sectionKicker: {
-    color: '#89938b',
-    fontSize: 9,
-    fontWeight: '500',
-    letterSpacing: 0.5,
-  },
-  sectionTitle: {
-    marginTop: 5,
-    color: '#202a27',
-    fontSize: 18,
-    fontWeight: '500',
-  },
-  connectionStatus: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 7,
-    paddingTop: 6,
-  },
-  signalDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: '#adb6ae',
-  },
-  connectionText: {
-    color: '#838d85',
-    fontSize: 9,
-    fontWeight: '500',
-    letterSpacing: 0.4,
-  },
-  previewFrame: {
-    position: 'relative',
-    width: '100%',
-    aspectRatio: 16 / 10,
-    overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: '#d8dfd7',
-    backgroundColor: '#e3e8e1',
-  },
-  vrButton: {
-    position: 'absolute',
-    zIndex: 5,
-    top: 38,
-    right: 12,
-    minHeight: 31,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 9,
-    borderWidth: 1,
-    borderColor: '#ffffff88',
-    backgroundColor: '#202a27c9',
-  },
-  vrButtonDisabled: {
-    opacity: 0.48,
-  },
-  vrButtonIcon: {
-    color: '#f5f5ef',
-    fontSize: 16,
-    lineHeight: 18,
-  },
-  vrButtonText: {
-    color: '#f5f5ef',
-    fontSize: 8,
-    fontWeight: '700',
-    letterSpacing: 0.55,
-  },
-  serverInput: {
-    height: 48,
-    marginTop: 12,
-    paddingHorizontal: 11,
-    borderWidth: 1,
-    borderColor: '#d8dfd7',
-    color: '#202a27',
-    fontSize: 12,
-    textAlignVertical: 'center',
-  },
-  connectButton: {
-    minHeight: 44,
+    borderColor: color.control,
     alignItems: 'center',
     justifyContent: 'center',
-    marginTop: 9,
-    paddingHorizontal: 14,
-    backgroundColor: '#202a27',
   },
-  connectButtonText: {
-    color: '#f5f5ef',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  disconnectButton: {
-    borderWidth: 1,
-    borderColor: '#d8dfd7',
-    backgroundColor: 'transparent',
-  },
-  disconnectButtonText: {
-    color: '#39453f',
-  },
-  connectionError: {
-    marginTop: 8,
-    color: '#9b4e39',
-    fontSize: 11,
-    lineHeight: 16,
-  },
-  buttonPressed: {
-    opacity: 0.78,
-  },
-  previewGrid: {
-    ...StyleSheet.absoluteFill,
-    opacity: 0.4,
-    borderColor: '#c4cec5',
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderLeftWidth: StyleSheet.hairlineWidth,
-  },
-  previewTopline: {
-    position: 'absolute',
-    top: 14,
-    left: 16,
-    right: 16,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-  },
-  feedLabel: {
-    color: '#68766d',
-    fontSize: 8,
-    fontWeight: '500',
-    letterSpacing: 0.4,
-  },
-  previewCenter: {
-    ...StyleSheet.absoluteFill,
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 18,
-  },
-  crosshairOuter: {
-    width: 49,
-    height: 49,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginBottom: 14,
-    borderWidth: 1,
-    borderColor: '#c3cdc4',
-    borderRadius: 25,
-  },
-  crosshairHorizontal: {
-    position: 'absolute',
-    width: 18,
-    height: 1,
-    backgroundColor: '#748078',
-  },
-  crosshairVertical: {
-    position: 'absolute',
-    width: 1,
-    height: 18,
-    backgroundColor: '#748078',
-  },
-  emptyTitle: {
-    color: '#3e4a43',
-    fontSize: 13,
-    fontWeight: '500',
-    textAlign: 'center',
-  },
-  emptyCaption: {
-    marginTop: 6,
-    color: '#838e85',
-    fontSize: 11,
-    textAlign: 'center',
-    lineHeight: 16,
-  },
-  frameCornerTopLeft: {
-    position: 'absolute',
-    top: 11,
-    left: 11,
-    width: 12,
-    height: 12,
-    borderTopWidth: 1,
-    borderLeftWidth: 1,
-    borderColor: '#9aa99b',
-  },
-  frameCornerTopRight: {
-    position: 'absolute',
-    top: 11,
-    right: 11,
-    width: 12,
-    height: 12,
-    borderTopWidth: 1,
-    borderRightWidth: 1,
-    borderColor: '#9aa99b',
-  },
-  frameCornerBottomLeft: {
-    position: 'absolute',
-    bottom: 11,
-    left: 11,
-    width: 12,
-    height: 12,
-    borderBottomWidth: 1,
-    borderLeftWidth: 1,
-    borderColor: '#9aa99b',
-  },
-  frameCornerBottomRight: {
-    position: 'absolute',
-    right: 11,
-    bottom: 11,
-    width: 12,
-    height: 12,
-    borderRightWidth: 1,
-    borderBottomWidth: 1,
-    borderColor: '#9aa99b',
-  },
-  previewBottomline: {
-    position: 'absolute',
-    right: 16,
-    bottom: 14,
-    left: 16,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-  },
-  infoNote: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 8,
-    marginTop: 13,
-  },
-  infoMark: {
-    width: 15,
-    height: 15,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: '#9baa9d',
-    borderRadius: 8,
-  },
-  infoMarkText: {
-    color: '#719174',
-    fontSize: 10,
-    fontWeight: '600',
-  },
-  infoText: {
-    flex: 1,
-    color: '#78837b',
-    fontSize: 10,
-    lineHeight: 15,
-  },
-  footer: {
-    minHeight: 51,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginTop: 'auto',
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: '#dce2da',
-  },
-  footerLabel: {
-    color: '#79837b',
-    fontSize: 8,
-    fontWeight: '500',
-    letterSpacing: 0.5,
-  },
-  footerVersion: {
-    color: '#879189',
-    fontSize: 8,
-    letterSpacing: 0.5,
-  },
+  buttonPrimary: { backgroundColor: '#ffffff', borderColor: '#ffffff' },
+  buttonText: { color: color.text, fontSize: 15, fontWeight: '600' },
+  buttonPrimaryText: { color: '#000000' },
+  wide: { marginTop: 12 },
+  disabled: { opacity: 0.4 },
+  pressed: { opacity: 0.75 },
+  error: { color: color.negative, backgroundColor: color.negativeBg, borderRadius: 6, padding: 12, marginTop: 12, fontSize: 13, lineHeight: 19 },
+  help: { color: color.muted, fontSize: 13, lineHeight: 19, marginTop: 12 },
+  simPanel: { flexDirection: 'row', alignItems: 'center', gap: 16 },
+  simText: { flex: 1 },
+  footer: { color: color.faint, fontSize: 12, lineHeight: 17, marginTop: 8 },
+  vr: { flex: 1, flexDirection: 'row', backgroundColor: '#000' },
+  vrEye: { flex: 1, overflow: 'hidden' },
+  vrDivider: { width: 2, backgroundColor: '#000' },
+  vrHint: { position: 'absolute', top: 16, left: 0, right: 0, alignItems: 'center', gap: 10, zIndex: 10, elevation: 10 },
+  vrHintText: { color: '#fff', fontSize: 13, backgroundColor: 'rgba(0,0,0,0.6)', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 14, overflow: 'hidden' },
+  vrExit: { height: 36, paddingHorizontal: 16, borderRadius: 18, borderWidth: 1, borderColor: 'rgba(255,255,255,0.5)', backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center' },
+  vrExitText: { color: '#fff', fontSize: 13, fontWeight: '600' },
 });

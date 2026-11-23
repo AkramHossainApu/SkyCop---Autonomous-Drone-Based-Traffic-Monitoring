@@ -1,24 +1,61 @@
-# SkyCop Android App
+# SkyCop app (Android and iOS)
 
-This native React Native app receives the SkyCop website camera feed over WebRTC. It does not open or request the phone's camera. The release APK runs standalone and does not need Expo Go or Metro after installation.
+The app receives the SkyCop website's camera feed over WebRTC and shows it side by side for a VR headset. It never opens the phone's own camera. It also contains the native VR flight simulation.
 
-## Native flight simulation
+## Watch the live camera
 
-Tap **OPEN 3D VR SIMULATION** from the app's home screen to enter its immersive landscape city simulation. A standard Bluetooth controller uses the left stick for throttle and yaw, the right stick for independent camera look, and the left/right triggers for altitude. The 3D view is split into matched left/right headset views. Tap the screen to reveal the temporary HUD, then tap **EXIT** to return to the portrait receiver. The city streams sectors ahead, and buildings, traffic, and signal poles have collision bounds. Cars queue at timed traffic lights and behind nearby traffic. When a live feed is connected, gamepad **X** switches directly between simulation and live headset video without showing the HUD during the transition.
+1. On the camera device, open the SkyCop website and tap **Start camera**.
+2. Scan the website's QR code with this phone's camera app, or open SkyCop and type the code (for example `abc-def-ghj`) and tap **Connect**. The app remembers the code.
+3. When the preview shows **Live**, tap **Watch in VR**. Tap the screen for **Leave VR**, or press **B** on a gamepad.
 
-## Pair with the website
+Both devices must be on the same Wi-Fi. Pairing details pass, encrypted, through the free ntfy.sh relay; video goes directly between the devices. The app keeps retrying if the camera stops or the Wi-Fi drops. The protocol lives in `pairing.ts` (app) and `../src/pairing.ts` (website); keep the two in step.
 
-1. Connect the website device and Android device to the same network. They must be allowed to connect directly to each other.
-2. Start the signaling host on the Mac as described in the root README.
-3. On the website, start the camera and select **Connect Android viewer**.
-4. Copy the invitation on the website and send it privately to Android. Open it with SkyCop or paste it into the meeting code field in the app.
-5. Tap **Join camera**. To stop sharing, disconnect in the app or stop the website camera.
+## Flight simulation
 
-The invitation grants access to the camera feed; share it privately. GitHub Pages requires a public `wss://` signaling address: use the temporary Mac tunnel described in the root README. No TURN relay is included, so guest networks, firewalls, and device/browser combinations can prevent direct connections even on the same Wi-Fi.
+Tap **Open** next to Flight simulation. The simulator lives in [`modules/skycop-sim`](modules/skycop-sim): Kotlin + OpenGL ES 3 on Android, Swift + Metal on iOS, with the same flight model, city, traffic, textures, menu and controls on both (the Swift core is a line-for-line port of the Kotlin core). It runs outside the React Native JavaScript thread, so nothing in the UI can stall it.
 
-When video is live, tap **VR FULL SCREEN** on the preview to rotate to landscape and display the same feed side-by-side for a headset. Tap **EXIT VR** to restore portrait. The viewer remains camera-free.
+Take off with **A**. In VR the camera follows your head one-to-one: turn, look up or down, or tilt, and the view does the same. Press **R3** (or Select) while looking straight ahead to set your forward direction.
 
-## Run from Android Studio
+| Control | Pilot layout (default) | Classic layout |
+| --- | --- | --- |
+| Left stick | Up/down, turn | Forward/back, turn |
+| Right stick | Move in any direction | Look around |
+| LT / RT | Down / up | Down / up |
+| LB / RB | Slower / faster flight mode | Slide left / right |
+| D-pad left / right | Flight mode | Flight mode |
+| D-pad up / down | Camera height (camera tilt when head tracking is off) | Same |
+| A | Take off / land | Take off / land |
+| B | Return home | Return home |
+| X | Switch to live camera and back | Switch to live camera and back |
+| Y | Chase / drone camera / survey view | Chase / drone camera / survey view |
+| R3 or Select | Set "forward" to where you are looking | Same |
+| Start | Menu | Menu |
+
+Flight modes:
+
+- **CINE**: slow and gentle, with obstacle braking.
+- **NORMAL**: balanced, with obstacle braking.
+- **SPORT**: fast, no obstacle braking, so you can crash.
+- **ATTI**: no GPS hold, so the drone drifts with momentum and wind.
+
+The menu has the layout switch, VR or full screen, head tracking, lens correction and spacing, comfort vignette, sensitivity, deadzone and more. Its bottom edge shows live stick and trigger positions. If a controller's axes look wrong there, run **CALIBRATE CONTROLLER**; the result is saved per controller. In full-screen mode without a controller, on-screen sticks appear.
+
+The city uses 18 surface textures with relief (brick, plaster, glass curtain wall, shopfronts, asphalt, paving, grass, bark, carbon fiber and more). They are painted by `core/Textures.kt` on first open, so there are no image assets to ship or license. Detail, shadows and resolution scale automatically to the phone's GPU and temperature.
+
+The simulator is a local Expo module, so `npx expo prebuild` keeps it. Run its physics, input and traffic tests (needs Android Studio, no device):
+
+```sh
+modules/skycop-sim/tests/run.sh
+```
+
+Print live telemetry from a connected device with:
+
+```sh
+adb shell setprop log.tag.SkyCopSim DEBUG
+adb logcat -s SkyCopSim
+```
+
+## Build for Android
 
 Open this folder's `android/` directory in Android Studio and run the `app` configuration. The native `android/` directory is generated locally by `npx expo prebuild --platform android` and is ignored by Git; regenerate it after cloning if needed.
 
@@ -32,4 +69,16 @@ With USB debugging enabled and the phone connected, install it with:
 adb install -r mobile/android/app/build/outputs/apk/release/app-release.apk
 ```
 
-The current test APK is built for `arm64-v8a` and uses a development signing key. It is not a Play Store release. A physical phone must support that architecture.
+The current test APK is built for `arm64-v8a` (`./gradlew :app:assembleRelease -PreactNativeArchitectures=arm64-v8a`) and uses a development signing key. It is not a Play Store release. A physical phone must support that architecture.
+
+## Build for iOS
+
+Needs a Mac with Xcode and CocoaPods. From this folder:
+
+```sh
+npx expo prebuild --platform ios
+cd ios && pod install && cd ..
+npx expo run:ios
+```
+
+`ios/` is generated and ignored by Git, like `android/`. To install on an iPhone, open `ios/SkyCop.xcworkspace` in Xcode, choose your Apple ID team under **Signing & Capabilities**, connect the iPhone and press Run. iOS asks once for permission to find devices on the local network; allow it, or the live video cannot connect. Gamepads work through Apple's GameController framework (Xbox, PlayStation, MFi and most Bluetooth controllers).
