@@ -24,7 +24,7 @@ export function useCameraLink() {
   const channelRef = useRef<PairingChannel | null>(null);
   const peerRef = useRef<RTCPeerConnection | null>(null);
   const cameraRef = useRef('');
-  const helloTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const helloTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [status, setStatus] = useState<LinkStatus>('idle');
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [error, setError] = useState('');
@@ -38,15 +38,23 @@ export function useCameraLink() {
   }, []);
 
   // Says hello until a camera answers, so the order in which the two sides start does not matter.
+  // The gap grows from 4 s to 30 s; the camera also prompts a hello whenever it comes online.
   const keepAsking = useCallback(() => {
-    if (helloTimer.current) clearInterval(helloTimer.current);
+    if (helloTimer.current) clearTimeout(helloTimer.current);
+    let gap = 4000;
     const ask = () => {
       const channel = channelRef.current;
       if (!channel || peerRef.current) return;
-      void channel.send('hello').catch(() => undefined);
+      channel.send('hello').then(() => {
+        if (channelRef.current === channel) setError((current) => (current.startsWith('Can\'t reach') ? '' : current));
+      }).catch((caught: unknown) => {
+        if (channelRef.current !== channel) return;
+        setError(`Can't reach the pairing relay (${caught instanceof Error ? caught.message : 'unknown error'}). Check this phone's internet connection.`);
+      });
+      helloTimer.current = setTimeout(ask, gap);
+      gap = Math.min(30000, gap * 2);
     };
     ask();
-    helloTimer.current = setInterval(ask, 6000);
   }, []);
 
   const answer = useCallback(async (message: Envelope) => {
@@ -89,7 +97,7 @@ export function useCameraLink() {
   }, [closePeer, keepAsking]);
 
   const disconnect = useCallback(() => {
-    if (helloTimer.current) clearInterval(helloTimer.current);
+    if (helloTimer.current) clearTimeout(helloTimer.current);
     const channel = channelRef.current;
     channelRef.current = null;
     if (channel) void channel.send('bye').catch(() => undefined).finally(() => channel.close());
@@ -118,12 +126,19 @@ export function useCameraLink() {
           setStatus('searching');
           setError('The camera stopped. It reconnects when the camera starts again.');
         }
-      }, (open) => {
+      }, (open, detail) => {
         if (channelRef.current !== channel) return;
-        if (open) keepAsking();
+        if (open) {
+          setError((current) => (current.startsWith('Can\'t reach') ? '' : current));
+          keepAsking();
+        } else {
+          setError(`Can't reach the pairing relay (${detail ?? 'connection lost'}). Retrying…`);
+        }
       });
       channelRef.current = channel;
       channel.open();
+      // Hello goes out by plain HTTPS straight away; it does not need the listening connection.
+      keepAsking();
     } catch (caught) {
       setStatus('error');
       setError(caught instanceof Error ? caught.message : 'Could not start pairing.');
@@ -131,7 +146,7 @@ export function useCameraLink() {
   }, [answer, closePeer, disconnect, keepAsking]);
 
   useEffect(() => () => {
-    if (helloTimer.current) clearInterval(helloTimer.current);
+    if (helloTimer.current) clearTimeout(helloTimer.current);
     channelRef.current?.close();
     peerRef.current?.close();
   }, []);

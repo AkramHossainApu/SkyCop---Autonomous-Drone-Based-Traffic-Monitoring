@@ -2,6 +2,7 @@
 // topic and key derivation, same envelope, same chunk format. Crypto runs natively in the SkyCopSim
 // module because React Native has no WebCrypto.
 import SkyCopSim from './modules/skycop-sim';
+import { MQTT_BROKERS, MqttLink } from './mqtt';
 
 const RELAY = 'https://ntfy.sh';
 const PART = 3000;
@@ -36,6 +37,11 @@ export function formatTyping(value: string): string {
 
 export class PairingChannel {
   private socket: WebSocket | null = null;
+  private links: MqttLink[] = [];
+  private ntfyOpen = false;
+  private wasOpen = false;
+  private done = new Set<string>();
+  private openedAt = 0;
   private key = '';
   private topic = '';
   private closed = false;
@@ -49,7 +55,7 @@ export class PairingChannel {
     code: string,
     private readonly role: Role,
     private readonly onMessage: (message: Envelope) => void,
-    private readonly onState: (open: boolean) => void,
+    private readonly onState: (open: boolean, detail?: string) => void,
   ) {
     if (!SkyCopSim) throw new Error('The SkyCop native module is missing from this build.');
     this.key = SkyCopSim.sha256Hex(`skycop/key/${code}`);
@@ -57,7 +63,19 @@ export class PairingChannel {
   }
 
   open() {
+    this.openedAt = Date.now();
+    this.links = MQTT_BROKERS.map((url) => new MqttLink(url, `skycop/${this.topic}`, (body) => this.receive(body), (ready, detail) => this.report(ready, detail)));
+    this.links.forEach((link) => link.open());
     this.connect();
+  }
+
+  /** Reports every transport that comes up (so the other side can be greeted again), and the moment all are down. */
+  private report(cameUp: boolean, detail?: string) {
+    if (this.closed) return;
+    const open = this.ntfyOpen || this.links.some((link) => link.ready);
+    if (cameUp) this.onState(true);
+    else if (!open && this.wasOpen) this.onState(false, detail);
+    this.wasOpen = open;
   }
 
   private connect() {
@@ -69,7 +87,8 @@ export class PairingChannel {
         const data = JSON.parse(String(event.data)) as { event: string; message?: string; time?: number };
         if (data.event === 'open') {
           this.retry = 0;
-          this.onState(true);
+          this.ntfyOpen = true;
+          this.report(true);
         } else if (data.event === 'message' && data.message) {
           if (data.time) this.since = Math.max(this.since, data.time);
           this.receive(data.message);
@@ -78,10 +97,16 @@ export class PairingChannel {
         // Ignore anything that is not a relay event.
       }
     };
-    socket.onclose = () => {
+    let failure = '';
+    socket.onerror = (event) => {
+      failure = (event as unknown as { message?: string }).message ?? 'connection error';
+    };
+    socket.onclose = (event) => {
       if (this.socket !== socket || this.closed) return;
-      this.onState(false);
-      this.timer = setTimeout(() => this.connect(), Math.min(15000, 1000 * 2 ** this.retry++));
+      const detail = failure || `closed (${event.code}${event.reason ? ` ${event.reason}` : ''})`;
+      this.ntfyOpen = false;
+      this.report(false, detail);
+      this.timer = setTimeout(() => this.connect(), Math.min(30000, 1000 * 2 ** this.retry++));
     };
   }
 
@@ -89,6 +114,7 @@ export class PairingChannel {
     const match = /^s1\.([a-z0-9]+)\.(\d+)\.(\d+)\.(.+)$/.exec(body);
     if (!match) return;
     const [, id, indexText, countText, part] = match;
+    if (this.done.has(id)) return;
     const index = Number(indexText); const count = Number(countText);
     if (count < 1 || count > 20 || index >= count) return;
     const parts = this.parts.get(id) ?? new Array<string>(count).fill('');
@@ -96,6 +122,8 @@ export class PairingChannel {
     this.parts.set(id, parts);
     if (parts.some((p) => !p)) return;
     this.parts.delete(id);
+    this.done.add(id);
+    if (this.done.size > 500) this.done.clear();
     const plain = SkyCopSim?.open(this.key, parts.join(''));
     if (!plain) return;
     try {
@@ -114,17 +142,32 @@ export class PairingChannel {
     const text = SkyCopSim.seal(this.key, JSON.stringify(message));
     const id = Math.random().toString(36).slice(2, 10);
     const count = Math.ceil(text.length / PART);
-    for (let i = 0; i < count; i++) {
-      const response = await fetch(`${RELAY}/${this.topic}`, {
-        method: 'POST',
-        body: `s1.${id}.${i}.${count}.${text.slice(i * PART, (i + 1) * PART)}`,
-      });
-      if (!response.ok) throw new Error(`The relay refused the message (${response.status}).`);
+    const bodies = Array.from({ length: count }, (_, i) => `s1.${id}.${i}.${count}.${text.slice(i * PART, (i + 1) * PART)}`);
+    // Right after opening, give the brokers a moment to connect before falling back.
+    for (let waited = 0; waited < 5000 && !this.links.some((link) => link.ready) && Date.now() - this.openedAt < 8000; waited += 250) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    let sent = false;
+    for (const link of this.links) {
+      if (bodies.every((body) => link.publish(body))) sent = true;
+    }
+    if (sent) return;
+    // No broker reachable: ntfy.sh, which allows 250 messages per network every 12 hours.
+    for (const body of bodies) {
+      let response: Response;
+      try {
+        response = await fetch(`${RELAY}/${this.topic}`, { method: 'POST', body });
+      } catch (caught) {
+        throw new Error(caught instanceof Error ? caught.message : String(caught));
+      }
+      if (response.status === 429) throw new Error('the relay is busy for this network, retrying');
+      if (!response.ok) throw new Error(`the relay answered ${response.status}`);
     }
   }
 
   close() {
     this.closed = true;
+    this.links.forEach((link) => link.close());
     if (this.timer) clearTimeout(this.timer);
     const socket = this.socket;
     this.socket = null;

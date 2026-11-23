@@ -1,10 +1,12 @@
 // Pairing over a public relay, with nothing to run on your own machine.
 //
 // GitHub Pages is HTTPS, so the page cannot talk to a phone on the local network directly. The two
-// sides exchange their WebRTC connection details once through ntfy.sh, a free public message relay
-// with browser support. Every message is encrypted with AES-256-GCM using a key derived from the
-// pairing code, so the relay only ever sees ciphertext. The video itself flows directly between the
+// sides exchange their WebRTC connection details once through free public relays: MQTT brokers over
+// WebSocket, with ntfy.sh as a fallback. Every message is encrypted with AES-256-GCM using a key
+// derived from the pairing code, so the relays only ever see ciphertext. The video itself flows directly between the
 // devices. The phone app implements the same protocol in mobile/pairing.ts.
+
+import { MQTT_BROKERS, MqttLink } from './mqtt';
 
 export const RELAY = 'https://ntfy.sh';
 const ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
@@ -67,16 +69,23 @@ async function keyFor(code: string) {
 }
 
 /**
- * One end of the relay channel. Messages from the same role are ignored, so a page can never answer
- * itself, and chunks are reassembled before decryption.
+ * One end of the relay channel. Messages go out over the public MQTT brokers (no quota) and fall
+ * back to an ntfy.sh POST only when no broker is reachable; they are received from all of them and
+ * de-duplicated. Messages from the same role are ignored, so a page can never answer itself, and
+ * chunks are reassembled before decryption.
  */
 export class PairingChannel {
   private socket: WebSocket | null = null;
+  private links: MqttLink[] = [];
   private key: CryptoKey | null = null;
   private topic = '';
   private closed = false;
   private retry = 0;
+  private ntfyOpen = false;
+  private wasOpen = false;
   private parts = new Map<string, string[]>();
+  private done = new Set<string>();
+  private openedAt = 0;
   private since = Math.floor(Date.now() / 1000) - 5;
   readonly session = Math.random().toString(36).slice(2, 10);
 
@@ -90,7 +99,19 @@ export class PairingChannel {
   async open() {
     this.key = await keyFor(this.code);
     this.topic = await topicFor(this.code);
+    this.openedAt = Date.now();
+    this.links = MQTT_BROKERS.map((url) => new MqttLink(url, `skycop/${this.topic}`, (body) => void this.receive(body), (ready) => this.report(ready)));
+    this.links.forEach((link) => link.open());
     this.connect();
+  }
+
+  /** Reports every transport that comes up (so the other side can be greeted again), and the moment all are down. */
+  private report(cameUp: boolean) {
+    if (this.closed) return;
+    const open = this.ntfyOpen || this.links.some((link) => link.ready);
+    if (cameUp) this.onState(true);
+    else if (!open && this.wasOpen) this.onState(false);
+    this.wasOpen = open;
   }
 
   private connect() {
@@ -102,7 +123,8 @@ export class PairingChannel {
       const data = JSON.parse(String(event.data)) as { event: string; message?: string; time?: number };
       if (data.event === 'open') {
         this.retry = 0;
-        this.onState(true);
+        this.ntfyOpen = true;
+        this.report(true);
       } else if (data.event === 'message' && data.message) {
         if (data.time) this.since = Math.max(this.since, data.time);
         void this.receive(data.message);
@@ -110,8 +132,9 @@ export class PairingChannel {
     };
     socket.onclose = () => {
       if (this.socket !== socket || this.closed) return;
-      this.onState(false);
-      const delay = Math.min(15000, 1000 * 2 ** this.retry++);
+      this.ntfyOpen = false;
+      this.report(false);
+      const delay = Math.min(30000, 1000 * 2 ** this.retry++);
       window.setTimeout(() => this.connect(), delay);
     };
   }
@@ -120,6 +143,7 @@ export class PairingChannel {
     const match = /^s1\.([a-z0-9]+)\.(\d+)\.(\d+)\.(.+)$/.exec(body);
     if (!match || !this.key) return;
     const [, id, indexText, countText, part] = match;
+    if (this.done.has(id)) return;
     const index = Number(indexText); const count = Number(countText);
     if (count < 1 || count > 20 || index >= count) return;
     const parts = this.parts.get(id) ?? new Array<string>(count).fill('');
@@ -127,6 +151,8 @@ export class PairingChannel {
     this.parts.set(id, parts);
     if (parts.some((p) => !p)) return;
     this.parts.delete(id);
+    this.done.add(id);
+    if (this.done.size > 500) this.done.clear();
     try {
       const sealed = fromBase64(parts.join(''));
       const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: sealed.slice(0, 12) }, this.key, sealed.slice(12));
@@ -149,17 +175,27 @@ export class PairingChannel {
     const text = toBase64(sealed);
     const id = Math.random().toString(36).slice(2, 10);
     const count = Math.ceil(text.length / PART);
-    for (let i = 0; i < count; i++) {
-      const response = await fetch(`${RELAY}/${this.topic}`, {
-        method: 'POST',
-        body: `s1.${id}.${i}.${count}.${text.slice(i * PART, (i + 1) * PART)}`,
-      });
+    const bodies = Array.from({ length: count }, (_, i) => `s1.${id}.${i}.${count}.${text.slice(i * PART, (i + 1) * PART)}`);
+    // Right after opening, give the brokers a moment to connect before falling back.
+    for (let waited = 0; waited < 5000 && !this.links.some((link) => link.ready) && Date.now() - this.openedAt < 8000; waited += 250) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    let sent = false;
+    for (const link of this.links) {
+      if (bodies.every((body) => link.publish(body))) sent = true;
+    }
+    if (sent) return;
+    // No broker reachable: ntfy.sh, which allows 250 messages per network every 12 hours.
+    for (const body of bodies) {
+      const response = await fetch(`${RELAY}/${this.topic}`, { method: 'POST', body });
+      if (response.status === 429) throw new Error('The relay is busy for this network right now. Try again in a few minutes.');
       if (!response.ok) throw new Error(`The relay refused the message (${response.status}).`);
     }
   }
 
   close() {
     this.closed = true;
+    this.links.forEach((link) => link.close());
     const socket = this.socket;
     this.socket = null;
     socket?.close();
