@@ -5,16 +5,18 @@ The app receives the SkyCop website's camera feed over WebRTC and shows it side 
 ## Watch the live camera
 
 1. On the camera device, open the SkyCop website and tap **Start camera**.
-2. Scan the website's QR code with this phone's camera app, or open SkyCop and type the code (for example `abc-def-ghj`) and tap **Connect**. The app remembers the code.
-3. When the preview shows **Live**, tap **Watch in VR**. Tap the screen for **Leave VR**, or press **B** on a gamepad.
+2. Tap the scan button next to the code field and point it at the website's QR code (it only accepts SkyCop codes), or type the code (for example `abc-def-ghj`) and tap **Connect**. The app remembers the code.
+3. When the preview shows **Live**, tap **Watch in VR**.
 
-Both devices must be on the same Wi-Fi. Pairing details pass, encrypted, through the free ntfy.sh relay; video goes directly between the devices. The app keeps retrying if the camera stops or the Wi-Fi drops. The protocol lives in `pairing.ts` (app) and `../src/pairing.ts` (website); keep the two in step.
+The live view is drawn by the same native VR renderer as the simulation: the video hangs as a screen in a dark room, stays put while your head moves, and takes the video's own shape, upright, whichever way the camera phone is held, so nothing is cropped. Gamepad **X** or **B** switches to the flight simulation; tap the screen (or press Start) for the menu and **EXIT SIMULATION** to go back to the app.
+
+Both devices must be on the same Wi-Fi. Pairing details pass, encrypted, through free public relays (MQTT brokers, with ntfy.sh as a fallback); video goes directly between the devices. The app keeps retrying if the camera stops or the Wi-Fi drops. The protocol lives in `pairing.ts` (app) and `../src/pairing.ts` (website); keep the two in step.
 
 ## Flight simulation
 
 Tap **Open** next to Flight simulation. The simulator lives in [`modules/skycop-sim`](modules/skycop-sim): Kotlin + OpenGL ES 3 on Android, Swift + Metal on iOS, with the same flight model, city, traffic, textures, menu and controls on both (the Swift core is a line-for-line port of the Kotlin core). It runs outside the React Native JavaScript thread, so nothing in the UI can stall it.
 
-Take off with **A**. In VR the camera follows your head one-to-one: turn, look up or down, or tilt, and the view does the same. Press **R3** (or Select) while looking straight ahead to set your forward direction.
+The city is a real part of Dhaka, built from OpenStreetMap data: choose **Bashundhara R/A** (around NSU and Jamuna Future Park) or **Mohammadpur** (Town Hall, Asad Gate, Saat Gambuj mosque) under **MAP** in the menu. Every road, building footprint, park, canal and junction is where it is in the real city; building heights are estimated from their type and size, since OpenStreetMap rarely has them for Dhaka. The drone starts on a dock near NSU or the Saat Gambuj mosque. Take off with **A**. **EXIT SIMULATION**, second in the menu, goes back to the app. The screen shows only the essentials, small, in the corners: flight mode, battery and flight time, speed and height. In VR the camera follows your head one-to-one: turn, look up or down, or tilt, and the view does the same. Press **R3** (or Select) while looking straight ahead to set your forward direction.
 
 | Control | Pilot layout (default) | Classic layout |
 | --- | --- | --- |
@@ -25,11 +27,20 @@ Take off with **A**. In VR the camera follows your head one-to-one: turn, look u
 | D-pad left / right | Flight mode | Flight mode |
 | D-pad up / down | Camera height (camera tilt when head tracking is off) | Same |
 | A | Take off / land | Take off / land |
-| B | Return home | Return home |
+| B | Fly to the nearest dock and land (press again to cancel) | Same |
 | X | Switch to live camera and back | Switch to live camera and back |
 | Y | Chase / drone camera / survey view | Chase / drone camera / survey view |
 | R3 or Select | Set "forward" to where you are looking | Same |
 | Start | Menu | Menu |
+
+Battery and docks:
+
+- Junctions of the real road network have charging docks on masts at their corners, about one every 150 m (77 in Bashundhara, 91 in Mohammadpur).
+- A full battery gives about 10 minutes of hovering (a bit less when flying hard). The corner shows the charge and the flight time left; while returning, the distance to the dock.
+- Landed on a dock, the drone charges from empty to full in 10 seconds.
+- Below 8 % it flies to the nearest dock by itself (push a stick to take over). If the battery runs flat in the air, the drone drops and comes back on the dock nearest to where it fell. A crash does the same.
+
+Traffic is 1,400 to 1,600 Dhaka vehicles (cars, green CNG auto-rickshaws, cycle rickshaws with their pullers, local buses, motorbikes with riders and microbuses) driving on the left along the real roads. They pick their own turns, follow the vehicle ahead, take turns at junctions (signals at the big crossings), never enter a junction whose exit is full, and come back in at the map's edge. Buses, CNGs and rickshaws stop for passengers and rickshaws crawl, so the main roads jam up and clear on their own.
 
 Flight modes:
 
@@ -39,6 +50,8 @@ Flight modes:
 - **ATTI**: no GPS hold, so the drone drifts with momentum and wind.
 
 The menu has the layout switch, VR or full screen, head tracking, lens correction and spacing, comfort vignette, sensitivity, deadzone and more. Its bottom edge shows live stick and trigger positions. If a controller's axes look wrong there, run **CALIBRATE CONTROLLER**; the result is saved per controller. In full-screen mode without a controller, on-screen sticks appear.
+
+Dhaka touches: six to ten storey apartment blocks with water tanks and stair rooms on the roof, shop signboards along the bigger roads, tin sheds in the lanes, mosques with domes and minarets (Saat Gambuj has its seven domes), concrete poles with sagging wires along the streets, raised medians on the main roads, and the rest of the city continuing past the map's edge into the haze. Maps are rebuilt from OpenStreetMap with `python3 modules/skycop-sim/maps/build_maps.py`. Map data © OpenStreetMap contributors (ODbL); the credit is shown in the simulator menu.
 
 The city uses 18 surface textures with relief (brick, plaster, glass curtain wall, shopfronts, asphalt, paving, grass, bark, carbon fiber and more). They are painted by `core/Textures.kt` on first open, so there are no image assets to ship or license. Detail, shadows and resolution scale automatically to the phone's GPU and temperature.
 

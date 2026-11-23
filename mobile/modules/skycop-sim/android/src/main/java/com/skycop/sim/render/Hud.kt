@@ -36,7 +36,7 @@ internal class Hud(private val batch: HudBatch) {
         "LB / RB", "SLOWER / FASTER MODE",
         "D-PAD UP/DOWN", "CAMERA HEIGHT",
         "A", "TAKE OFF / LAND",
-        "B", "RETURN HOME",
+        "B", "RETURN TO DOCK",
         "X", "LIVE CAMERA",
         "Y", "CHANGE VIEW",
         "R3 / SELECT", "RECENTER VIEW",
@@ -49,7 +49,7 @@ internal class Hud(private val batch: HudBatch) {
         "LB / RB", "SLIDE LEFT / RIGHT",
         "D-PAD LEFT/RIGHT", "FLIGHT MODE",
         "A", "TAKE OFF / LAND",
-        "B", "RETURN HOME",
+        "B", "RETURN TO DOCK",
         "X", "LIVE CAMERA",
         "Y", "CHANGE VIEW",
         "R3 / SELECT", "RECENTER VIEW",
@@ -62,7 +62,7 @@ internal class Hud(private val batch: HudBatch) {
         menuHalf = min(310f, halfWidth * 0.86f)
         batch.begin()
         when (game.screen) {
-            Screen.FLIGHT -> {
+            Screen.FLIGHT -> if (game.watchingLive) live(game) else {
                 flight(game)
                 if (!game.settings.vr && game.controllerName == null) sticks(touch)
             }
@@ -72,10 +72,14 @@ internal class Hud(private val batch: HudBatch) {
         }
         val toast = game.toast
         if (toast != null) {
-            val y = if (game.screen == Screen.FLIGHT) -100f else 222f
-            val w = toast.length * 10.5f + 28f
-            batch.color(PANEL, 0.82f); batch.rect(-w / 2, y - 5, w, 32f)
-            batch.color(ACCENT); batch.text(toast, 0f, y, 22f, 0.5f)
+            if (game.screen == Screen.FLIGHT) {
+                val vr = game.settings.vr
+                tag(toast, 0f, if (vr) -112f else -HALF_HEIGHT + 40f, if (vr) 13f else 16f, ACCENT, 0.5f)
+            } else {
+                val w = toast.length * 10.5f + 28f
+                batch.color(PANEL, 0.82f); batch.rect(-w / 2, 217f, w, 32f)
+                batch.color(ACCENT); batch.text(toast, 0f, 222f, 22f, 0.5f)
+            }
         }
         batch.upload()
     }
@@ -85,73 +89,76 @@ internal class Hud(private val batch: HudBatch) {
         batch.rect(x, y, width, height)
     }
 
+    /** Small text with a faint backing, so it reads over sky and buildings without hiding much. */
+    private fun tag(text: CharSequence, x: Float, y: Float, size: Float, color: Int, align: Float) {
+        val width = text.length * size * 0.5f
+        batch.color(PANEL, 0.35f); batch.rect(x - width * align - 5f, y - 3f, width + 10f, size + 6f)
+        batch.color(color); batch.text(text, x, y, size, align)
+    }
+
+    /**
+     * Only what a pilot needs, small and in the corners, so nearly the whole view is the world:
+     * mode and phase top left, battery top right, speed bottom left, height bottom right.
+     */
     private fun flight(game: Game) {
-        // In a headset only the middle of each eye is readable.
+        // In a headset the corners of each lens are out of view, so the corners sit further in.
         val vr = game.settings.vr
-        val w = if (vr) min(250f, halfWidth * 0.76f) else halfWidth - 28f
-        val h = if (vr) 178f else HALF_HEIGHT - 18f
+        val w = if (vr) min(205f, halfWidth * 0.6f) else halfWidth - 14f
+        val h = if (vr) 138f else HALF_HEIGHT - 12f
+        val size = if (vr) 13f else 15f
         val drone = game.drone; val pose = drone.render
 
-        panel(-w, -h, 152f, 50f)
-        batch.color(ACCENT); batch.text(drone.mode.label, -w + 8, -h + 5, 19f)
-        batch.color(WHITE); batch.text(drone.phase.label, -w + 8, -h + 25, 17f)
+        line.setLength(0); line.append(drone.mode.label).append("  ").append(drone.phase.label)
+        tag(line, -w, -h, size, WHITE, 0f)
 
-        panel(w - 128, -h, 128f, 70f)
         val battery = drone.battery
-        line.setLength(0); line.append("BATT ").append(ceil(battery).toInt()).append('%')
-        batch.color(if (battery < 10) DANGER else if (battery < 25) WARN else GOOD)
-        batch.text(line, w - 8, -h + 5, 19f, 1f)
-        batch.rect(w - 120, -h + 27, 112f * battery / 100f, 4f)
-        line.setLength(0); line.append("HOME ").append(drone.homeDistance.toInt()).append('M')
-        batch.color(MUTED); batch.text(line, w - 8, -h + 38, 17f, 1f)
+        val batteryColor = if (battery < 10) DANGER else if (battery < 25) WARN else GOOD
+        line.setLength(0); line.append(ceil(battery).toInt()).append('%')
+        if (drone.charging) line.append(" CHARGING")
+        else if (drone.phase == Phase.RETURN) line.append(" DOCK ").append(drone.dockDistance.toInt()).append('M')
+        else {
+            val seconds = drone.flightSecondsLeft.toInt()
+            line.append(' ').append(seconds / 60).append(':')
+            if (seconds % 60 < 10) line.append('0')
+            line.append(seconds % 60)
+        }
+        tag(line, w, -h, size, batteryColor, 1f)
+        batch.color(batteryColor, 0.9f); batch.rect(w - 44f, -h + size + 5f, 44f * battery / 100f, 2f)
 
-        compass(game, -h)
-
-        panel(-w, h - 62, 120f, 62f)
-        batch.color(MUTED); batch.text("SPEED KM/H", -w + 8, h - 58, 15f)
-        line.setLength(0); line.append((drone.speed * 3.6f).roundToInt())
-        batch.color(WHITE); batch.text(line, -w + 8, h - 40, 34f)
-        panel(w - 120, h - 62, 120f, 62f)
-        batch.color(MUTED); batch.text("HEIGHT M", w - 8, h - 58, 15f, 1f)
+        line.setLength(0); line.append((drone.speed * 3.6f).roundToInt()).append(" KM/H")
+        tag(line, -w, h - size, size, WHITE, 0f)
         val height = (drone.height * 10).roundToInt()
-        line.setLength(0); line.append(height / 10).append('.').append(height % 10)
-        batch.color(WHITE); batch.text(line, w - 8, h - 40, 34f, 1f)
-
-        radar(pose, 0f, h - 34f)
+        line.setLength(0); line.append(height / 10).append('.').append(height % 10).append(" M")
+        tag(line, w, h - size, size, WHITE, 1f)
 
         if (game.camera.view == View.ONBOARD) horizon(pose)
 
         val blink = game.clock % 0.8f < 0.5f
-        if (drone.phase == Phase.LANDED) {
-            batch.color(PANEL, 0.7f); batch.rect(-120f, -62f, 240f, 54f)
-            batch.color(WHITE); batch.text("PRESS A TO TAKE OFF", 0f, -57f, 21f, 0.5f)
-            batch.color(MUTED)
-            batch.text(if (game.controllerName == null && !vr) "OR PUSH LEFT STICK UP" else "START: MENU + CONTROLS", 0f, -34f, 17f, 0.5f)
+        val hint = h - size * 3.2f
+        if (drone.phase == Phase.LANDED && drone.charging) {
+            line.setLength(0); line.append("CHARGING ").append(ceil(battery).toInt()).append('%')
+            tag(line, 0f, hint, size, ACCENT, 0.5f)
+        } else if (drone.phase == Phase.LANDED) {
+            tag(if (!drone.canTakeOff) "BATTERY EMPTY" else if (game.controllerName == null && !vr) "FLY/LAND OR LEFT STICK UP" else "A: TAKE OFF", 0f, hint, size, WHITE, 0.5f)
         } else if (blink && drone.obstacle < 14f) {
-            batch.color(WARN); batch.text("OBSTACLE", 0f, 62f, 22f, 0.5f)
+            tag("OBSTACLE", 0f, hint, size, WARN, 0.5f)
         } else if (blink && battery < 15f) {
-            batch.color(DANGER); batch.text("LOW BATTERY", 0f, 62f, 22f, 0.5f)
+            tag("LOW BATTERY", 0f, hint, size, DANGER, 0.5f)
         }
-        if (game.headSensorMissing) {
-            batch.color(WARN); batch.text("THIS PHONE HAS NO MOTION SENSOR", 0f, -118f, 17f, 0.5f)
-        }
-        if (game.controllerName == null && vr) {
-            batch.color(WARN); batch.text("NO CONTROLLER - TAP FOR MENU", 0f, 90f, 17f, 0.5f)
-        }
+        if (game.headSensorMissing) tag("NO MOTION SENSOR", 0f, -h, size, WARN, 0.5f)
+        if (game.controllerName == null && vr) tag("NO CONTROLLER - TAP FOR MENU", 0f, h - size, size, WARN, 0.5f)
     }
 
-    private fun compass(game: Game, top: Float) {
-        val span = 62f
-        // The compass follows where the pilot is looking, so it moves with the head.
-        val b = game.camera.basis
-        val heading = atan2(-b[8], b[10])
-        batch.color(PANEL, 0.4f); batch.rect(-span - 6, top, span * 2 + 12, 30f)
-        for (k in 0 until 24) {
-            val offset = wrapAngle(k * PI_F / 12 - heading) * 70f
-            if (abs(offset) > span) continue
-            batch.color(WHITE, 0.8f)
-            if (k % 6 == 0) batch.text(if (k == 0) "N" else if (k == 6) "E" else if (k == 12) "S" else "W", offset, top + 4, 18f, 0.5f)
-            else batch.rect(offset - 1, top + 18, 2f, 7f)
+    /** Live camera: a small label, and the controls for a few seconds after switching. */
+    private fun live(game: Game) {
+        val vr = game.settings.vr
+        val w = if (vr) min(205f, halfWidth * 0.6f) else halfWidth - 14f
+        val h = if (vr) 138f else HALF_HEIGHT - 12f
+        val size = if (vr) 13f else 15f
+        if (game.liveHasVideo) tag("LIVE CAMERA", -w, -h, size, GOOD, 0f)
+        else tag("WAITING FOR VIDEO", 0f, 0f, size + 2f, WARN, 0.5f)
+        if (game.clock - game.liveSince < 5f) {
+            tag(if (game.controllerName == null) "TAP: MENU" else "X OR B: SIMULATION   START: MENU", 0f, h - size, size, MUTED, 0.5f)
         }
     }
 
@@ -162,25 +169,6 @@ internal class Hud(private val batch: HudBatch) {
         batch.line(-c, s - offset, -c * 0.3f, s * 0.3f - offset, 2f)
         batch.line(c * 0.3f, -s * 0.3f - offset, c, -s - offset, 2f)
         batch.rect(-2f, -2f, 4f, 4f)
-    }
-
-    private fun radar(pose: DronePose, cx: Float, cy: Float) {
-        val radius = 38f; val scale = radius / 170f
-        batch.color(PANEL, 0.5f)
-        for (i in 0 until 20) {
-            val a = i * PI_F / 10; val b = (i + 1) * PI_F / 10
-            batch.triangle(cx, cy, cx + cos(a) * radius, cy + sin(a) * radius, cx + cos(b) * radius, cy + sin(b) * radius)
-        }
-        val c = cos(pose.yaw); val s = sin(pose.yaw)
-        fun blip(x: Float, z: Float, color: Int, size: Float) {
-            val dx = x - pose.x; val dz = z - pose.z
-            var rx = (dx * c + dz * s) * scale; var ry = (-dx * s + dz * c) * scale
-            val d = hypot(rx, ry)
-            if (d > radius - 3) { rx *= (radius - 3) / d; ry *= (radius - 3) / d }
-            batch.color(color); batch.rect(cx + rx - size / 2, cy + ry - size / 2, size, size)
-        }
-        blip(City.HOME_X, City.HOME_Z, GOOD, 6f)
-        batch.color(WHITE); batch.triangle(cx - 5, cy + 5, cx + 5, cy + 5, cx, cy - 7)
     }
 
     private fun sticks(touch: TouchSticks) {
@@ -244,6 +232,7 @@ internal class Hud(private val batch: HudBatch) {
         line.setLength(0); line.append(fps).append(" FPS   A SELECT  B BACK")
         batch.text(line, menuHalf - 4, 182f, 16f, 1f)
         batch.text("SWIPE TO SCROLL", -menuHalf + 170, 182f, 14f)
+        batch.text("MAP DATA (C) OPENSTREETMAP CONTRIBUTORS", 0f, 200f, 12f, 0.5f)
     }
 
     private fun stick(cx: Float, cy: Float, x: Float, y: Float) {
@@ -259,6 +248,7 @@ internal class Hud(private val batch: HudBatch) {
     private fun value(item: MenuItem, s: Settings): CharSequence? = when (item) {
         MenuItem.LAYOUT -> if (s.classicLayout) "CLASSIC" else "PILOT"
         MenuItem.VR -> if (s.vr) "VR HEADSET" else "FULL SCREEN"
+        MenuItem.MAP -> MapData.TITLES[s.map]
         MenuItem.INVERT_CLIMB -> onOff(s.invertClimb)
         MenuItem.INVERT_LOOK -> onOff(s.invertLook)
         MenuItem.HEAD -> onOff(s.headTracking)

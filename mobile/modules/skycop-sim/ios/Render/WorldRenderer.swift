@@ -72,7 +72,7 @@ final class WorldRenderer {
   private static let SHADOW_HALF: Float = 85, NEAR: Float = 0.15, FAR: Float = 1400
 
   private let device: MTLDevice
-  private let city: City
+  private var city: City
   let worldPipeline: MTLRenderPipelineState
   private let shadowPipeline: MTLRenderPipelineState
   private let skyPipeline: MTLRenderPipelineState
@@ -86,9 +86,9 @@ final class WorldRenderer {
   private let relief: MTLTexture
   private let single: MTLBuffer
 
-  private let terrain: GpuMesh
-  private let blocks: [GpuMesh]
-  private let details: [GpuMesh]
+  private var terrain: GpuMesh
+  private var blocks: [GpuMesh]
+  private var details: [GpuMesh]
   private let droneBody: GpuMesh
   private let propeller: GpuMesh
   private let rotorDisc: GpuMesh
@@ -210,7 +210,7 @@ final class WorldRenderer {
     droneBody = GpuMesh(device, Models.drone())
     propeller = GpuMesh(device, Models.propeller())
     rotorDisc = GpuMesh(device, Models.rotorDisc())
-    vehicles = Models.vehicles().map { GpuMesh(device, $0, maxInstances: Traffic.COUNT) }
+    vehicles = Models.vehicles().map { GpuMesh(device, $0, maxInstances: Traffic.MAX_VEHICLES) }
 
     // Same direction as SUN in the shaders.
     let length = sqrt(Float(0.45 * 0.45 + 0.78 * 0.78 + 0.38 * 0.38))
@@ -243,12 +243,12 @@ final class WorldRenderer {
     for mesh in vehicles { mesh.beginInstances(frame) }
     let traffic = game.traffic
     let b = game.camera.basis
-    for car in 0..<Traffic.COUNT {
+    for car in 0..<traffic.count {
       let x = traffic.x[car], z = traffic.z[car]
       let dx = x - eye[0], dz = z - eye[2]
       if abs(dx) > level.carRange || abs(dz) > level.carRange { continue }
       if abs(dx) + abs(dz) > 70 && -(dx * b[8] + dz * b[10]) < -30 && abs(b[9]) < 0.45 { continue }
-      vehicles[traffic.type[car]].addInstance(x, 0, z, traffic.yaw[car], traffic.color[car])
+      vehicles[traffic.type[car]].addInstance(x, traffic.y[car], z, traffic.yaw[car], traffic.color[car])
     }
     if showShadows { renderShadowMap(pose, commands) }
   }
@@ -328,7 +328,8 @@ final class WorldRenderer {
       for i in blocks.indices {
         let chunk = city.chunks[i]
         let distance = hypot(chunk.x - x, chunk.z - z)
-        if distance < from || distance >= to || !visible(chunk) { continue }
+        // Past this the haze has swallowed everything anyway.
+        if distance < from || distance >= to || distance - chunk.reach > 950 || !visible(chunk) { continue }
         blocks[i].draw(encoder, single: single)
         if distance < quality.detailRange { details[i].draw(encoder, single: single) }
       }
@@ -361,8 +362,16 @@ final class WorldRenderer {
     }
   }
 
+  /// Swaps in another map's city; the old meshes go when their last reference does.
+  func load(_ next: City) {
+    city = next
+    terrain = GpuMesh(device, next.terrain)
+    blocks = next.chunks.map { GpuMesh(device, $0.mesh) }
+    details = next.chunks.map { GpuMesh(device, $0.detail) }
+  }
+
   private func visible(_ chunk: City.Chunk) -> Bool {
-    let half = City.PITCH / 2 + 9
+    let half = chunk.reach + 2
     for p in 0...5 {
       let a = planes[p * 4], b = planes[p * 4 + 1], c = planes[p * 4 + 2], d = planes[p * 4 + 3]
       let reach = a * chunk.x + abs(a) * half + max(0, b * chunk.top) + c * chunk.z + abs(c) * half + d

@@ -13,7 +13,7 @@ enum class FlightMode(
 }
 
 enum class Phase(val label: String) {
-    LANDED("LANDED"), TAKEOFF("TAKE-OFF"), FLYING("FLYING"), LANDING("LANDING"), RETURN("RETURN HOME"), CRASHED("CRASHED"),
+    LANDED("LANDED"), TAKEOFF("TAKE-OFF"), FLYING("FLYING"), LANDING("LANDING"), RETURN("TO DOCK"), CRASHED("CRASHED"),
 }
 
 /** All axes are -1..1: right, up and forward are positive. */
@@ -56,6 +56,10 @@ class DronePose {
  * Sticks command a velocity; the flight computer turns that into an acceleration; the airframe has
  * to lean to produce it, because thrust only acts along the drone's own up axis. Gravity, drag,
  * wind, motor lag, ground effect and battery drain act on top of that.
+ *
+ * A full battery gives about ten minutes of hovering; a dock charges it from empty in ten seconds.
+ * Return to dock flies to the nearest dock. If the battery runs flat in the air the drone drops,
+ * and comes back on the dock nearest to where it fell.
  */
 class DroneSim(private val city: City, private val traffic: Traffic) {
     companion object {
@@ -71,6 +75,11 @@ class DroneSim(private val city: City, private val traffic: Traffic) {
         private const val CLIMB_ACCEL = 9f
         /** Natural frequency of the attitude response, in rad/s. */
         private const val AGILITY = 15f
+        /** Percent per second while hovering: 100 % lasts ten minutes. */
+        const val HOVER_DRAIN = 100f / 600f
+        /** Percent per second on a dock: empty to full in ten seconds. */
+        const val CHARGE_RATE = 10f
+        const val LOW_BATTERY = 8f
     }
 
     val pose = DronePose()
@@ -98,6 +107,15 @@ class DroneSim(private val city: City, private val traffic: Traffic) {
     /** Strongest bump since the host last cleared it; used for rumble and camera feedback. */
     var impact = 0f
     var crashes = 0
+        private set
+    /** Times the battery ran flat in the air. */
+    var depletions = 0
+        private set
+    /** Times low battery sent the drone back to a dock by itself. */
+    var autoReturns = 0
+        private set
+    /** Dock the drone is flying to, or -1. */
+    var dockTarget = -1
         private set
 
     private var accumulator = 0f
@@ -128,28 +146,68 @@ class DroneSim(private val city: City, private val traffic: Traffic) {
     private var takeoffHeight = 0f
     private var landingPressed = 0f
     private var lowBatteryHandled = false
+    private var returnAltitude = 0f
+    private var strandedFor = 0f
     private val normal = FloatArray(3)
 
     val airborne get() = phase != Phase.LANDED && phase != Phase.CRASHED
     val height get() = max(0f, pose.y - GEAR - ground)
     val speed get() = hypot(vx, vz)
-    val homeDistance get() = hypot(pose.x - City.HOME_X, pose.z - City.HOME_Z)
+    val homeDistance get() = hypot(pose.x - city.docks[city.homeDock * 3], pose.z - city.docks[city.homeDock * 3 + 2])
+    val nearestDock get() = city.nearestDock(pose.x, pose.z)
+    val dockDistance: Float get() {
+        val d = nearestDock
+        return hypot(pose.x - city.docks[d * 3], pose.z - city.docks[d * 3 + 2])
+    }
+    /** Resting on a dock's deck, where it charges. */
+    val onDock: Boolean get() {
+        val d = nearestDock
+        return phase == Phase.LANDED && dockDistance < City.DOCK_RADIUS - 0.1f &&
+            abs(pose.y - GEAR - city.docks[d * 3 + 1]) < 0.3f
+    }
+    val charging get() = onDock && battery < 100f
+    /** Seconds of hovering left at the current charge. */
+    val flightSecondsLeft get() = battery / HOVER_DRAIN
 
     init {
         reset()
     }
 
+    /** A fresh flight: full battery, on the pad at the station. */
     fun reset() {
-        pose.x = City.HOME_X; pose.z = City.HOME_Z; pose.y = City.HOME_Y + GEAR
-        pose.yaw = 0f; pose.pitch = 0f; pose.roll = 0f; pose.rotor = 0f
+        battery = 100f
+        placeOnDock(city.homeDock)
+        pose.yaw = 0f; previous.yaw = 0f; render.yaw = 0f
+    }
+
+    /** Puts the drone on a dock, landed, keeping whatever charge it has; the dock tops it up. */
+    private fun placeOnDock(dock: Int) {
+        val d = city.docks
+        pose.x = d[dock * 3]; pose.z = d[dock * 3 + 2]; pose.y = d[dock * 3 + 1] + GEAR
+        pose.pitch = 0f; pose.roll = 0f; pose.rotor = 0f
         previous.copyFrom(pose); render.copyFrom(pose)
         vx = 0f; vy = 0f; vz = 0f
         yawVelocity = 0f; pitchVelocity = 0f; rollVelocity = 0f
         clearTargets()
-        thrust = 0f; battery = 100f; impact = 0f; accumulator = 0f
-        obstacle = Float.MAX_VALUE; ground = City.HOME_Y
-        lowBatteryHandled = false
+        thrust = 0f; impact = 0f; accumulator = 0f
+        obstacle = Float.MAX_VALUE; ground = d[dock * 3 + 1]
+        lowBatteryHandled = false; dockTarget = -1; strandedFor = 0f
         change(Phase.LANDED)
+    }
+
+    /** Puts the drone hovering at a point, at rest. Used by tests and tools. */
+    fun placeAt(x: Float, y: Float, z: Float, yaw: Float) {
+        pose.x = x; pose.y = y; pose.z = z; pose.yaw = yaw; pose.pitch = 0f; pose.roll = 0f
+        previous.copyFrom(pose); render.copyFrom(pose)
+        vx = 0f; vy = 0f; vz = 0f
+        yawVelocity = 0f; pitchVelocity = 0f; rollVelocity = 0f
+        clearTargets()
+        dockTarget = -1
+        change(Phase.FLYING)
+    }
+
+    private fun respawnNearest() {
+        placeOnDock(city.nearestDock(pose.x, pose.z))
     }
 
     private fun clearTargets() {
@@ -169,7 +227,7 @@ class DroneSim(private val city: City, private val traffic: Traffic) {
     fun toggleTakeoffLanding() {
         when (phase) {
             Phase.LANDED -> takeOff()
-            Phase.CRASHED -> reset()
+            Phase.CRASHED -> respawnNearest()
             Phase.LANDING -> change(Phase.FLYING)
             else -> change(Phase.LANDING)
         }
@@ -177,14 +235,26 @@ class DroneSim(private val city: City, private val traffic: Traffic) {
 
     fun toggleReturnHome() {
         when (phase) {
-            Phase.RETURN -> change(Phase.FLYING)
-            Phase.FLYING, Phase.TAKEOFF, Phase.LANDING -> change(Phase.RETURN)
+            Phase.RETURN -> { dockTarget = -1; change(Phase.FLYING) }
+            Phase.FLYING, Phase.TAKEOFF, Phase.LANDING -> startReturn()
             else -> Unit
         }
     }
 
+    /** Picks the nearest dock and a cruising height that clears everything on the way there. */
+    private fun startReturn() {
+        val dock = city.nearestDock(pose.x, pose.z)
+        val d = city.docks
+        dockTarget = dock
+        val clear = city.highestAlong(pose.x, pose.z, d[dock * 3], d[dock * 3 + 2]) + 2f
+        returnAltitude = min(max(clear, d[dock * 3 + 1] + 4f), CEILING - 4f)
+        change(Phase.RETURN)
+    }
+
+    val canTakeOff get() = battery >= 1f
+
     private fun takeOff() {
-        if (battery < 3f) return
+        if (!canTakeOff) return
         clearTargets()
         takeoffHeight = pose.y + 2.6f
         change(Phase.TAKEOFF)
@@ -210,9 +280,14 @@ class DroneSim(private val city: City, private val traffic: Traffic) {
             vx = 0f; vy = 0f; vz = 0f; thrust = 0f
             pose.pitch *= 1 - 10 * dt; pose.roll *= 1 - 10 * dt
             pose.rotor *= 1 - 2 * dt
-            if (homeDistance < 5.5f) {
-                battery = min(100f, battery + 10f * dt)
+            if (onDock) {
+                battery = min(100f, battery + CHARGE_RATE * dt)
                 lowBatteryHandled = false
+                strandedFor = 0f
+            } else if (battery < 1f) {
+                // Flat battery away from a dock: it is carried back to the nearest one.
+                strandedFor += dt
+                if (strandedFor > 2f) { depletions++; respawnNearest(); return }
             }
             if (input.climb > 0.45f) takeOff()
             return
@@ -223,15 +298,23 @@ class DroneSim(private val city: City, private val traffic: Traffic) {
         }
 
         val pilot = max(max(abs(input.forward), abs(input.strafe)), abs(input.climb))
-        if ((phase == Phase.RETURN || phase == Phase.LANDING) && phaseTime > 0.4f && battery > 1f) {
+        if ((phase == Phase.RETURN || phase == Phase.LANDING) && phaseTime > 0.4f) {
             val override = if (phase == Phase.LANDING) max(max(abs(input.forward), abs(input.strafe)), input.climb) else pilot
-            if (override > 0.4f) change(Phase.FLYING)
+            if (override > 0.4f) { dockTarget = -1; change(Phase.FLYING) }
         }
-        if (battery < 8f && !lowBatteryHandled && phase == Phase.FLYING) {
+        if (battery < LOW_BATTERY && !lowBatteryHandled && phase == Phase.FLYING) {
             lowBatteryHandled = true
-            change(Phase.RETURN)
+            autoReturns++
+            startReturn()
         }
-        if (battery <= 1f && phase != Phase.LANDING) change(Phase.LANDING)
+        if (battery <= 0f) {
+            // Out of power: the motors stop and it falls.
+            depletions++
+            dockTarget = -1
+            change(Phase.CRASHED)
+            fall(dt)
+            return
+        }
 
         var wantX = 0f; var wantY = 0f; var wantZ = 0f
         var wantYawRate = 0f
@@ -258,21 +341,38 @@ class DroneSim(private val city: City, private val traffic: Traffic) {
                 wantY = -(0.55f + height * 0.45f).coerceAtMost(2.6f)
                 wantYawRate = input.yaw * mode.yawRate * yawSensitivity
                 landingPressed = if (height < 0.08f) landingPressed + dt else 0f
+                if (dockTarget >= 0) {
+                    // Keep centered over the deck all the way down.
+                    val d = city.docks
+                    wantX = ((d[dockTarget * 3] - pose.x) * 1.5f).coerceIn(-1.5f, 1.5f)
+                    wantZ = ((d[dockTarget * 3 + 2] - pose.z) * 1.5f).coerceIn(-1.5f, 1.5f)
+                }
             }
             Phase.RETURN -> {
-                val dx = City.HOME_X - pose.x; val dz = City.HOME_Z - pose.z
+                if (dockTarget < 0) startReturn()
+                val d = city.docks
+                val tx = d[dockTarget * 3]; val ty = d[dockTarget * 3 + 1]; val tz = d[dockTarget * 3 + 2]
+                val dx = tx - pose.x; val dz = tz - pose.z
                 val distance = hypot(dx, dz)
-                val safe = min(city.tallest + 7f, CEILING - 4f)
-                if (distance < 0.7f && speed < 0.8f) {
+                val above = pose.y - GEAR - ty
+                if (distance < 0.45f && speed < 0.6f && above < 2.2f && above > -0.2f) {
                     change(Phase.LANDING)
-                } else if (pose.y < safe - 1.5f && distance > 4f) {
-                    wantY = min(7f, (safe - pose.y) * 1.2f + 0.5f)
+                } else if (distance < 2.6f && above < 0f) {
+                    // Underneath the deck: slide out from under it before climbing.
+                    val away = if (distance > 0.05f) distance else 1f
+                    wantX = -dx / away * 3f; wantZ = -dz / away * 3f
+                    wantY = 1f
+                } else if (distance > 6f && pose.y < returnAltitude - 1.5f) {
+                    wantY = min(7f, (returnAltitude - pose.y) * 1.2f + 0.5f)
                 } else {
-                    val pace = min(14f, distance * 0.6f)
+                    val pace = min(14f, distance * 0.7f + 0.3f)
                     if (distance > 0.05f) { wantX = dx / distance * pace; wantZ = dz / distance * pace }
-                    if (distance > 4f) {
-                        wantY = ((safe - pose.y) * 0.8f).coerceIn(-2f, 3f)
+                    if (distance > 6f) {
+                        wantY = ((returnAltitude - pose.y) * 0.8f).coerceIn(-3f, 3f)
                         wantYawRate = (wrapAngle(atan2(dx, -dz) - pose.yaw) * 2f).coerceIn(-1.4f, 1.4f)
+                    } else {
+                        // The air above a junction is open, so come down while closing in.
+                        wantY = ((ty + 1.2f + GEAR - pose.y) * 0.9f).coerceIn(-3.5f, 1.5f)
                     }
                 }
             }
@@ -414,12 +514,13 @@ class DroneSim(private val city: City, private val traffic: Traffic) {
         pose.rotor = sqrt(max(0f, thrust) / GRAVITY).coerceAtLeast(0.25f * spool)
 
         val load = thrust / GRAVITY
-        battery = max(0f, battery - dt * (0.025f + 0.085f * load * sqrt(max(0f, load))))
+        battery = max(0f, battery - dt * HOVER_DRAIN * (0.7f + 0.3f * load * sqrt(max(0f, load))))
 
         collide()
         if (phase != Phase.CRASHED && landingPressed > 0.55f) {
             clearTargets()
             vx = 0f; vy = 0f; vz = 0f; yawVelocity = 0f
+            dockTarget = -1
             change(Phase.LANDED)
         }
     }
@@ -438,7 +539,7 @@ class DroneSim(private val city: City, private val traffic: Traffic) {
         } else {
             pose.pitch += 3.5f * dt; pose.roll += 2.1f * dt
         }
-        if (phaseTime > 3.5f) reset()
+        if (phaseTime > 3.5f) respawnNearest()
     }
 
     private fun collide() {
@@ -453,80 +554,71 @@ class DroneSim(private val city: City, private val traffic: Traffic) {
                 vx *= 1 - 6 * STEP; vz *= 1 - 6 * STEP
             }
         }
-        // Blocks are bucketed by center, so neighbors can hold boxes that reach this point.
-        val here = city.chunkAt(pose.x, pose.z)
-        collideBoxes(here)
-        val sideX = if (pose.x > here.x) City.PITCH else -City.PITCH
-        val sideZ = if (pose.z > here.z) City.PITCH else -City.PITCH
-        val nearEdgeX = abs(pose.x - here.x) > 24f
-        val nearEdgeZ = abs(pose.z - here.z) > 24f
-        var other: City.Chunk
-        if (nearEdgeX) {
-            other = city.chunkAt(here.x + sideX, here.z)
-            if (other !== here) collideBoxes(other)
-        }
-        if (nearEdgeZ) {
-            other = city.chunkAt(here.x, here.z + sideZ)
-            if (other !== here) collideBoxes(other)
-        }
-        if (nearEdgeX && nearEdgeZ) {
-            other = city.chunkAt(here.x + sideX, here.z + sideZ)
-            if (other !== here) collideBoxes(other)
-        }
-        if (pose.y < 4f) collideTraffic()
+        // Colliders are registered in every chunk they overlap, so the drone's own chunk is enough
+        // unless it is right on a boundary.
+        val r = RADIUS + 0.05f
+        val i0 = cellOf(pose.x - r); val i1 = cellOf(pose.x + r)
+        val j0 = cellOf(pose.z - r); val j1 = cellOf(pose.z + r)
+        for (j in j0..j1) for (i in i0..i1) collideBoxes(city.chunks[j * City.CELLS + i])
+        if (pose.y < 8f) collideTraffic()
     }
+
+    private fun cellOf(v: Float) = floor((v + City.HALF) / City.CELL).toInt().coerceIn(0, City.CELLS - 1)
 
     private fun collideBoxes(c: City.Chunk) {
         if (pose.y - RADIUS > c.top) return
         val b = c.boxes
         var k = 0
-        while (k < c.count * 6) {
-            if (b[k + 4] > pose.y - GEAR + 0.03f) pushOut(b[k], b[k + 1], b[k + 2], b[k + 3], b[k + 4], b[k + 5], 0f, 0f)
-            k += 6
+        while (k < c.count * 8) {
+            if (b[k + 7] > pose.y - GEAR + 0.03f) pushOut(b[k], b[k + 1], b[k + 2], b[k + 3], b[k + 4], b[k + 5], b[k + 6], b[k + 7], 0f, 0f)
+            k += 8
         }
     }
 
     private fun collideTraffic() {
-        for (car in 0 until Traffic.COUNT) {
+        for (car in 0 until traffic.count) {
             val x = traffic.x[car]; val z = traffic.z[car]
             if (abs(x - pose.x) > 7f || abs(z - pose.z) > 7f) continue
-            val alongX = abs(sin(traffic.yaw[car])) > 0.5f
-            val halfX = (if (alongX) traffic.length(car) else traffic.width(car)) / 2
-            val halfZ = (if (alongX) traffic.width(car) else traffic.length(car)) / 2
+            val base = traffic.y[car]
+            if (pose.y < base - 1f || pose.y > base + 5f) continue
+            // A vehicle's long axis points along its heading: (sin yaw, -cos yaw).
+            val c = sin(traffic.yaw[car]); val s = -cos(traffic.yaw[car])
             val v = traffic.speed[car]
-            pushOut(
-                x - halfX, 0f, z - halfZ, x + halfX, traffic.height(car), z + halfZ,
-                sin(traffic.yaw[car]) * v, -cos(traffic.yaw[car]) * v,
-            )
+            pushOut(x, z, c, s, traffic.length(car) / 2, traffic.width(car) / 2, base, base + traffic.height(car), c * v, s * v)
         }
     }
 
-    private fun pushOut(x0: Float, y0: Float, z0: Float, x1: Float, y1: Float, z1: Float, moveX: Float, moveZ: Float) {
-        val dx = pose.x - pose.x.coerceIn(x0, x1)
+    /** Pushes the drone's sphere out of an oriented box; the box may move with (moveX, moveZ). */
+    private fun pushOut(cx: Float, cz: Float, c: Float, s: Float, hx: Float, hz: Float, y0: Float, y1: Float, moveX: Float, moveZ: Float) {
+        val rx = pose.x - cx; val rz = pose.z - cz
+        val u = rx * c + rz * s; val w = -rx * s + rz * c
+        if (abs(u) > hx + RADIUS || abs(w) > hz + RADIUS || pose.y < y0 - RADIUS || pose.y > y1 + RADIUS) return
+        val du = u - u.coerceIn(-hx, hx)
         val dy = pose.y - pose.y.coerceIn(y0, y1)
-        val dz = pose.z - pose.z.coerceIn(z0, z1)
-        val squared = dx * dx + dy * dy + dz * dz
+        val dw = w - w.coerceIn(-hz, hz)
+        val squared = du * du + dy * dy + dw * dw
         if (squared >= RADIUS * RADIUS) return
-        var nx = 0f; var ny = 0f; var nz = 0f
+        var nu = 0f; var ny = 0f; var nw = 0f
         val push: Float
         if (squared > 1e-6f) {
             val distance = sqrt(squared)
-            nx = dx / distance; ny = dy / distance; nz = dz / distance
+            nu = du / distance; ny = dy / distance; nw = dw / distance
             push = RADIUS - distance
         } else {
-            val left = pose.x - x0; val right = x1 - pose.x
-            val back = pose.z - z0; val front = z1 - pose.z
+            val left = u + hx; val right = hx - u
+            val back = w + hz; val front = hz - w
             val up = y1 - pose.y
             val least = min(min(min(left, right), min(back, front)), up)
             when (least) {
-                left -> nx = -1f
-                right -> nx = 1f
-                back -> nz = -1f
-                front -> nz = 1f
+                left -> nu = -1f
+                right -> nu = 1f
+                back -> nw = -1f
+                front -> nw = 1f
                 else -> ny = 1f
             }
             push = least + RADIUS
         }
+        val nx = nu * c - nw * s; val nz = nu * s + nw * c
         pose.x += nx * push; pose.y += ny * push; pose.z += nz * push
         hit(nx, ny, nz, moveX * nx + moveZ * nz)
     }
@@ -547,6 +639,7 @@ class DroneSim(private val city: City, private val traffic: Traffic) {
         if (force > 1.5f) impact = max(impact, force)
         if (force > 9f && phase != Phase.CRASHED) {
             crashes++
+            dockTarget = -1
             change(Phase.CRASHED)
         }
     }

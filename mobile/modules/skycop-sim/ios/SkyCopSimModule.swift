@@ -9,7 +9,7 @@ public class SkyCopSimModule: Module {
     Name("SkyCopSim")
     Events("onControllerButton")
 
-    AsyncFunction("openSimulation") { (liveAvailable: Bool, promise: Promise) in
+    AsyncFunction("openSimulation") { (liveAvailable: Bool, startLive: Bool, promise: Promise) in
       guard self.pending == nil else {
         promise.reject("ERR_ALREADY_OPEN", "The simulation is already open.")
         return
@@ -20,12 +20,20 @@ public class SkyCopSimModule: Module {
       }
       self.pending = promise
       Textures.prepare()
-      let controller = SimulationViewController(liveAvailable: liveAvailable) { [weak self] result in
+      let controller = SimulationViewController(liveAvailable: liveAvailable, startLive: startLive) { [weak self] result in
         self?.pending?.resolve(result)
         self?.pending = nil
       }
       presenter.present(controller, animated: false)
     }.runOnQueue(.main)
+
+    // The live camera stream to show in VR, by react-native-webrtc stream URL; nil when there is none.
+    Function("setLiveStream") { (streamUrl: String?) in
+      DispatchQueue.main.async { [weak self] in
+        let module: NSObject? = self?.appContext?.nativeModule(named: "WebRTCModule")
+        LiveFeed.shared.follow(module, streamUrl)
+      }
+    }
 
     AsyncFunction("watchControllerButtons") {
       ControllerHub.shared.shortcutHandler = { [weak self] button in

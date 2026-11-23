@@ -24,7 +24,7 @@ enum Phase {
     case .takeoff: return "TAKE-OFF"
     case .flying: return "FLYING"
     case .landing: return "LANDING"
-    case .returnHome: return "RETURN HOME"
+    case .returnHome: return "TO DOCK"
     case .crashed: return "CRASHED"
     }
   }
@@ -57,6 +57,11 @@ final class DroneSim {
   private static let JERK: Float = 12
   private static let CLIMB_ACCEL: Float = 9
   private static let AGILITY: Float = 15
+  /// Percent per second while hovering: 100 % lasts ten minutes.
+  static let HOVER_DRAIN: Float = 100 / 600
+  /// Percent per second on a dock: empty to full in ten seconds.
+  static let CHARGE_RATE: Float = 10
+  static let LOW_BATTERY: Float = 8
 
   private let city: City
   private let traffic: Traffic
@@ -75,6 +80,12 @@ final class DroneSim {
   var windEnabled = true
   var impact: Float = 0
   private(set) var crashes = 0
+  /// Times the battery ran flat in the air.
+  private(set) var depletions = 0
+  /// Times low battery sent the drone back to a dock by itself.
+  private(set) var autoReturns = 0
+  /// Dock the drone is flying to, or -1.
+  private(set) var dockTarget = -1
 
   private var accumulator: Float = 0, time: Float = 0, phaseTime: Float = 0
   private var yawVelocity: Float = 0, pitchVelocity: Float = 0, rollVelocity: Float = 0
@@ -88,12 +99,29 @@ final class DroneSim {
   private var takeoffHeight: Float = 0
   private var landingPressed: Float = 0
   private var lowBatteryHandled = false
+  private var returnAltitude: Float = 0
+  private var strandedFor: Float = 0
   private var normal: [Float] = [0, 0, 0]
 
   var airborne: Bool { phase != .landed && phase != .crashed }
   var height: Float { max(0, pose.y - DroneSim.GEAR - ground) }
   var speed: Float { hypot(vx, vz) }
-  var homeDistance: Float { hypot(pose.x - City.HOME_X, pose.z - City.HOME_Z) }
+  var homeDistance: Float { hypot(pose.x - city.docks[city.homeDock * 3], pose.z - city.docks[city.homeDock * 3 + 2]) }
+  var nearestDock: Int { city.nearestDock(pose.x, pose.z) }
+  var dockDistance: Float {
+    let d = nearestDock
+    return hypot(pose.x - city.docks[d * 3], pose.z - city.docks[d * 3 + 2])
+  }
+  /// Resting on a dock's deck, where it charges.
+  var onDock: Bool {
+    let d = nearestDock
+    return phase == .landed && dockDistance < City.DOCK_RADIUS - 0.1 &&
+      abs(pose.y - DroneSim.GEAR - city.docks[d * 3 + 1]) < 0.3
+  }
+  var charging: Bool { onDock && battery < 100 }
+  /// Seconds of hovering left at the current charge.
+  var flightSecondsLeft: Float { battery / DroneSim.HOVER_DRAIN }
+  var canTakeOff: Bool { battery >= 1 }
 
   init(city: City, traffic: Traffic) {
     self.city = city
@@ -101,16 +129,42 @@ final class DroneSim {
     reset()
   }
 
+  /// A fresh flight: full battery, on the pad at the station.
   func reset() {
-    pose = DronePose(x: City.HOME_X, y: City.HOME_Y + DroneSim.GEAR, z: City.HOME_Z)
+    battery = 100
+    placeOnDock(city.homeDock)
+    pose.yaw = 0; previous.yaw = 0; render.yaw = 0
+  }
+
+  /// Puts the drone on a dock, landed, keeping whatever charge it has; the dock tops it up.
+  private func placeOnDock(_ dock: Int) {
+    let d = city.docks
+    let yaw = pose.yaw
+    pose = DronePose(x: d[dock * 3], y: d[dock * 3 + 1] + DroneSim.GEAR, z: d[dock * 3 + 2])
+    pose.yaw = yaw
     previous = pose; render = pose
     vx = 0; vy = 0; vz = 0
     yawVelocity = 0; pitchVelocity = 0; rollVelocity = 0
     clearTargets()
-    thrust = 0; battery = 100; impact = 0; accumulator = 0
-    obstacle = .greatestFiniteMagnitude; ground = City.HOME_Y
-    lowBatteryHandled = false
+    thrust = 0; impact = 0; accumulator = 0
+    obstacle = .greatestFiniteMagnitude; ground = d[dock * 3 + 1]
+    lowBatteryHandled = false; dockTarget = -1; strandedFor = 0
     change(.landed)
+  }
+
+  /// Puts the drone hovering at a point, at rest. Used by tests and tools.
+  func placeAt(_ x: Float, _ y: Float, _ z: Float, _ yaw: Float) {
+    pose = DronePose(x: x, y: y, z: z, yaw: yaw)
+    previous = pose; render = pose
+    vx = 0; vy = 0; vz = 0
+    yawVelocity = 0; pitchVelocity = 0; rollVelocity = 0
+    clearTargets()
+    dockTarget = -1
+    change(.flying)
+  }
+
+  private func respawnNearest() {
+    placeOnDock(city.nearestDock(pose.x, pose.z))
   }
 
   private func clearTargets() {
@@ -130,7 +184,7 @@ final class DroneSim {
   func toggleTakeoffLanding() {
     switch phase {
     case .landed: takeOff()
-    case .crashed: reset()
+    case .crashed: respawnNearest()
     case .landing: change(.flying)
     default: change(.landing)
     }
@@ -138,14 +192,24 @@ final class DroneSim {
 
   func toggleReturnHome() {
     switch phase {
-    case .returnHome: change(.flying)
-    case .flying, .takeoff, .landing: change(.returnHome)
+    case .returnHome: dockTarget = -1; change(.flying)
+    case .flying, .takeoff, .landing: startReturn()
     default: break
     }
   }
 
+  /// Picks the nearest dock and a cruising height that clears everything on the way there.
+  private func startReturn() {
+    let dock = city.nearestDock(pose.x, pose.z)
+    let d = city.docks
+    dockTarget = dock
+    let clear = city.highestAlong(pose.x, pose.z, d[dock * 3], d[dock * 3 + 2]) + 2
+    returnAltitude = min(max(clear, d[dock * 3 + 1] + 4), DroneSim.CEILING - 4)
+    change(.returnHome)
+  }
+
   private func takeOff() {
-    if battery < 3 { return }
+    if !canTakeOff { return }
     clearTargets()
     takeoffHeight = pose.y + 2.6
     change(.takeoff)
@@ -172,9 +236,14 @@ final class DroneSim {
       vx = 0; vy = 0; vz = 0; thrust = 0
       pose.pitch *= 1 - 10 * dt; pose.roll *= 1 - 10 * dt
       pose.rotor *= 1 - 2 * dt
-      if homeDistance < 5.5 {
-        battery = min(100, battery + 10 * dt)
+      if onDock {
+        battery = min(100, battery + DroneSim.CHARGE_RATE * dt)
         lowBatteryHandled = false
+        strandedFor = 0
+      } else if battery < 1 {
+        // Flat battery away from a dock: it is carried back to the nearest one.
+        strandedFor += dt
+        if strandedFor > 2 { depletions += 1; respawnNearest(); return }
       }
       if input.climb > 0.45 { takeOff() }
       return
@@ -185,15 +254,23 @@ final class DroneSim {
     }
 
     let pilot = max(max(abs(input.forward), abs(input.strafe)), abs(input.climb))
-    if (phase == .returnHome || phase == .landing) && phaseTime > 0.4 && battery > 1 {
+    if (phase == .returnHome || phase == .landing) && phaseTime > 0.4 {
       let override = phase == .landing ? max(max(abs(input.forward), abs(input.strafe)), input.climb) : pilot
-      if override > 0.4 { change(.flying) }
+      if override > 0.4 { dockTarget = -1; change(.flying) }
     }
-    if battery < 8 && !lowBatteryHandled && phase == .flying {
+    if battery < DroneSim.LOW_BATTERY && !lowBatteryHandled && phase == .flying {
       lowBatteryHandled = true
-      change(.returnHome)
+      autoReturns += 1
+      startReturn()
     }
-    if battery <= 1 && phase != .landing { change(.landing) }
+    if battery <= 0 {
+      // Out of power: the motors stop and it falls.
+      depletions += 1
+      dockTarget = -1
+      change(.crashed)
+      fall(dt)
+      return
+    }
 
     var wantX: Float = 0, wantY: Float = 0, wantZ: Float = 0
     var wantYawRate: Float = 0
@@ -218,20 +295,37 @@ final class DroneSim {
       wantY = -min(2.6, 0.55 + height * 0.45)
       wantYawRate = input.yaw * mode.yawRate * yawSensitivity
       landingPressed = height < 0.08 ? landingPressed + dt : 0
+      if dockTarget >= 0 {
+        // Keep centered over the deck all the way down.
+        let d = city.docks
+        wantX = ((d[dockTarget * 3] - pose.x) * 1.5).clamped(-1.5, 1.5)
+        wantZ = ((d[dockTarget * 3 + 2] - pose.z) * 1.5).clamped(-1.5, 1.5)
+      }
     case .returnHome:
-      let dx = City.HOME_X - pose.x, dz = City.HOME_Z - pose.z
+      if dockTarget < 0 { startReturn() }
+      let d = city.docks
+      let tx = d[dockTarget * 3], ty = d[dockTarget * 3 + 1], tz = d[dockTarget * 3 + 2]
+      let dx = tx - pose.x, dz = tz - pose.z
       let distance = hypot(dx, dz)
-      let safe = min(city.tallest + 7, CEILING - 4)
-      if distance < 0.7 && speed < 0.8 {
+      let above = pose.y - GEAR - ty
+      if distance < 0.45 && speed < 0.6 && above < 2.2 && above > -0.2 {
         change(.landing)
-      } else if pose.y < safe - 1.5 && distance > 4 {
-        wantY = min(7, (safe - pose.y) * 1.2 + 0.5)
+      } else if distance < 2.6 && above < 0 {
+        // Underneath the deck: slide out from under it before climbing.
+        let away: Float = distance > 0.05 ? distance : 1
+        wantX = -dx / away * 3; wantZ = -dz / away * 3
+        wantY = 1
+      } else if distance > 6 && pose.y < returnAltitude - 1.5 {
+        wantY = min(7, (returnAltitude - pose.y) * 1.2 + 0.5)
       } else {
-        let pace = min(14, distance * 0.6)
+        let pace = min(14, distance * 0.7 + 0.3)
         if distance > 0.05 { wantX = dx / distance * pace; wantZ = dz / distance * pace }
-        if distance > 4 {
-          wantY = ((safe - pose.y) * 0.8).clamped(-2, 3)
+        if distance > 6 {
+          wantY = ((returnAltitude - pose.y) * 0.8).clamped(-3, 3)
           wantYawRate = (wrapAngle(atan2(dx, -dz) - pose.yaw) * 2).clamped(-1.4, 1.4)
+        } else {
+          // The air above a junction is open, so come down while closing in.
+          wantY = ((ty + 1.2 + GEAR - pose.y) * 0.9).clamped(-3.5, 1.5)
         }
       }
     default: break
@@ -367,12 +461,13 @@ final class DroneSim {
     pose.rotor = max(0.25 * spool, sqrt(max(0, thrust) / GRAVITY))
 
     let load = thrust / GRAVITY
-    battery = max(0, battery - dt * (0.025 + 0.085 * load * sqrt(max(0, load))))
+    battery = max(0, battery - dt * DroneSim.HOVER_DRAIN * (0.7 + 0.3 * load * sqrt(max(0, load))))
 
     collide()
     if phase != .crashed && landingPressed > 0.55 {
       clearTargets()
       vx = 0; vy = 0; vz = 0; yawVelocity = 0
+      dockTarget = -1
       change(.landed)
     }
   }
@@ -391,7 +486,7 @@ final class DroneSim {
     } else {
       pose.pitch += 3.5 * dt; pose.roll += 2.1 * dt
     }
-    if phaseTime > 3.5 { reset() }
+    if phaseTime > 3.5 { respawnNearest() }
   }
 
   private func collide() {
@@ -405,71 +500,68 @@ final class DroneSim {
         vx *= 1 - 6 * DroneSim.STEP; vz *= 1 - 6 * DroneSim.STEP
       }
     }
-    let here = city.chunkIndex(pose.x, pose.z)
-    collideBoxes(here)
-    let chunk = city.chunks[here]
-    let sideX = pose.x > chunk.x ? City.PITCH : -City.PITCH
-    let sideZ = pose.z > chunk.z ? City.PITCH : -City.PITCH
-    let nearEdgeX = abs(pose.x - chunk.x) > 24, nearEdgeZ = abs(pose.z - chunk.z) > 24
-    if nearEdgeX {
-      let other = city.chunkIndex(chunk.x + sideX, chunk.z)
-      if other != here { collideBoxes(other) }
+    // Colliders are registered in every chunk they overlap, so the drone's own chunk is enough
+    // unless it is right on a boundary.
+    let r = DroneSim.RADIUS + 0.05
+    for j in cellOf(pose.z - r)...cellOf(pose.z + r) {
+      for i in cellOf(pose.x - r)...cellOf(pose.x + r) { collideBoxes(j * City.CELLS + i) }
     }
-    if nearEdgeZ {
-      let other = city.chunkIndex(chunk.x, chunk.z + sideZ)
-      if other != here { collideBoxes(other) }
-    }
-    if nearEdgeX && nearEdgeZ {
-      let other = city.chunkIndex(chunk.x + sideX, chunk.z + sideZ)
-      if other != here { collideBoxes(other) }
-    }
-    if pose.y < 4 { collideTraffic() }
+    if pose.y < 8 { collideTraffic() }
   }
+
+  private func cellOf(_ v: Float) -> Int { Int(floor((v + City.HALF) / City.CELL)).clamped(0, City.CELLS - 1) }
 
   private func collideBoxes(_ index: Int) {
     let c = city.chunks[index]
     if pose.y - DroneSim.RADIUS > c.top { return }
     let limit = pose.y - DroneSim.GEAR + 0.03
-    c.boxes.withUnsafeBufferPointer { b in
-      var k = 0
-      while k < c.count * 6 {
-        if b[k + 4] > limit { pushOut(b[k], b[k + 1], b[k + 2], b[k + 3], b[k + 4], b[k + 5], 0, 0) }
-        k += 6
-      }
+    let b = c.boxes
+    var k = 0
+    while k < c.count * 8 {
+      if b[k + 7] > limit { pushOut(b[k], b[k + 1], b[k + 2], b[k + 3], b[k + 4], b[k + 5], b[k + 6], b[k + 7], 0, 0) }
+      k += 8
     }
   }
 
   private func collideTraffic() {
-    for car in 0..<Traffic.COUNT {
+    for car in 0..<traffic.count {
       let x = traffic.x[car], z = traffic.z[car]
       if abs(x - pose.x) > 7 || abs(z - pose.z) > 7 { continue }
-      let alongX = abs(sin(traffic.yaw[car])) > 0.5
-      let halfX = (alongX ? traffic.length(car) : traffic.width(car)) / 2
-      let halfZ = (alongX ? traffic.width(car) : traffic.length(car)) / 2
+      let base = traffic.y[car]
+      if pose.y < base - 1 || pose.y > base + 5 { continue }
+      // A vehicle's long axis points along its heading: (sin yaw, -cos yaw).
+      let c = sin(traffic.yaw[car]), s = -cos(traffic.yaw[car])
       let v = traffic.speed[car]
-      pushOut(x - halfX, 0, z - halfZ, x + halfX, traffic.height(car), z + halfZ, sin(traffic.yaw[car]) * v, -cos(traffic.yaw[car]) * v)
+      pushOut(x, z, c, s, traffic.length(car) / 2, traffic.width(car) / 2, base, base + traffic.height(car), c * v, s * v)
     }
   }
 
-  private func pushOut(_ x0: Float, _ y0: Float, _ z0: Float, _ x1: Float, _ y1: Float, _ z1: Float, _ moveX: Float, _ moveZ: Float) {
+  /// Pushes the drone's sphere out of an oriented box; the box may move with (moveX, moveZ).
+  private func pushOut(_ cx: Float, _ cz: Float, _ c: Float, _ s: Float, _ hx: Float, _ hz: Float, _ y0: Float, _ y1: Float, _ moveX: Float, _ moveZ: Float) {
     let R = DroneSim.RADIUS
-    let dx = pose.x - pose.x.clamped(x0, x1)
+    let rx = pose.x - cx, rz = pose.z - cz
+    let u = rx * c + rz * s, w = -rx * s + rz * c
+    if abs(u) > hx + R || abs(w) > hz + R || pose.y < y0 - R || pose.y > y1 + R { return }
+    let du = u - u.clamped(-hx, hx)
     let dy = pose.y - pose.y.clamped(y0, y1)
-    let dz = pose.z - pose.z.clamped(z0, z1)
-    let squared = dx * dx + dy * dy + dz * dz
+    let dw = w - w.clamped(-hz, hz)
+    let squared = du * du + dy * dy + dw * dw
     if squared >= R * R { return }
-    var nx: Float = 0, ny: Float = 0, nz: Float = 0
+    var nu: Float = 0, ny: Float = 0, nw: Float = 0
     let push: Float
     if squared > 1e-6 {
       let distance = sqrt(squared)
-      nx = dx / distance; ny = dy / distance; nz = dz / distance
+      nu = du / distance; ny = dy / distance; nw = dw / distance
       push = R - distance
     } else {
-      let left = pose.x - x0, right = x1 - pose.x, back = pose.z - z0, front = z1 - pose.z, up = y1 - pose.y
+      let left = u + hx, right = hx - u
+      let back = w + hz, front = hz - w
+      let up = y1 - pose.y
       let least = min(min(min(left, right), min(back, front)), up)
-      if least == left { nx = -1 } else if least == right { nx = 1 } else if least == back { nz = -1 } else if least == front { nz = 1 } else { ny = 1 }
+      if least == left { nu = -1 } else if least == right { nu = 1 } else if least == back { nw = -1 } else if least == front { nw = 1 } else { ny = 1 }
       push = least + R
     }
+    let nx = nu * c - nw * s, nz = nu * s + nw * c
     pose.x += nx * push; pose.y += ny * push; pose.z += nz * push
     hit(nx, ny, nz, moveX * nx + moveZ * nz)
   }
@@ -490,6 +582,7 @@ final class DroneSim {
     if force > 1.5 { impact = max(impact, force) }
     if force > 9 && phase != .crashed {
       crashes += 1
+      dockTarget = -1
       change(.crashed)
     }
   }

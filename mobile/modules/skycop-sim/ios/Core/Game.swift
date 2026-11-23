@@ -8,17 +8,18 @@ protocol GameHost: AnyObject {
   func calibrationCleared()
   func recenterHead()
   func rumble(_ strength: Float)
+  /// The pilot picked another map; the platform rebuilds the city and starts a new flight there.
+  func mapChanged()
 }
 
 enum MenuItem: Int, CaseIterable {
-  case resume, layout, controls, calibrate, defaultMapping, sensitivity, deadzone, invertClimb, invertLook
-  case vr, head, lens, spacing, comfort, shadows, wind, sound, restart, exit
+  case resume, exit, map, layout, controls, calibrate, defaultMapping, sensitivity, deadzone, invertClimb, invertLook
+  case vr, head, lens, spacing, comfort, shadows, wind, sound, restart
 
   var label: String {
-    ["RESUME FLIGHT", "CONTROL LAYOUT", "SHOW CONTROLS", "CALIBRATE CONTROLLER", "RESET CONTROLLER MAPPING",
+    ["RESUME FLIGHT", "EXIT SIMULATION", "MAP", "CONTROL LAYOUT", "SHOW CONTROLS", "CALIBRATE CONTROLLER", "RESET CONTROLLER MAPPING",
      "TURN SENSITIVITY", "STICK DEADZONE", "INVERT CLIMB STICK", "INVERT CAMERA TILT", "DISPLAY", "HEAD TRACKING",
-     "LENS CORRECTION", "LENS SPACING", "COMFORT VIGNETTE", "SHADOWS", "WIND", "ROTOR SOUND", "RESTART FLIGHT",
-     "EXIT SIMULATION"][rawValue]
+     "LENS CORRECTION", "LENS SPACING", "COMFORT VIGNETTE", "SHADOWS", "WIND", "ROTOR SOUND", "RESTART FLIGHT"][rawValue]
   }
 }
 
@@ -28,8 +29,8 @@ final class Game {
   let city: City
   let settings: Settings
   private weak var host: GameHost?
-  private var liveAvailable: Bool
-  let traffic = Traffic()
+  var liveAvailable: Bool
+  let traffic: Traffic
   let drone: DroneSim
   let camera: CameraRig
   let calibration = Calibration()
@@ -42,18 +43,29 @@ final class Game {
   private(set) var toast: String?
   private(set) var clock: Float = 0
   private(set) var propellerAngle: Float = 0
+  /// Watching the live camera instead of flying; the flight waits, paused, until X or B.
+  private(set) var watchingLive = false
+  /// Set by the renderer: a frame of live video has arrived.
+  var liveHasVideo = false
+  /// Head orientation for the live screen, which is fixed in the room.
+  private(set) var liveBasis: [Float] = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+  private(set) var liveSince: Float = 0
 
   private let input = PilotInput()
   private var toastUntil: Float = 0
   private var repeatIn: Float = 0
   private var lastDirection = 0
   private var crashes = 0
+  private var depletions = 0
+  private var autoReturns = 0
+  private var wasCharging = false
 
   init(city: City, settings: Settings, host: GameHost, liveAvailable: Bool) {
     self.city = city
     self.settings = settings
     self.host = host
     self.liveAvailable = liveAvailable
+    traffic = Traffic(city: city)
     drone = DroneSim(city: city, traffic: traffic)
     camera = CameraRig(city: city)
   }
@@ -72,28 +84,54 @@ final class Game {
   func update(_ dt: Float, _ pad: PadState, _ pressed: Int, _ mapping: InputMapping, _ raw: [Float], _ head: [Float], _ tracked: Bool) {
     clock += dt
     if toast != nil && clock > toastUntil { toast = nil }
+    if watchingLive && !liveAvailable {
+      watchingLive = false
+      show("LIVE CAMERA DISCONNECTED")
+    }
     switch screen {
-    case .flight: fly(dt, pad, pressed)
+    case .flight: if watchingLive { watch(pressed) } else { fly(dt, pad, pressed) }
     case .menu: navigate(dt, pad, pressed)
     case .controls: if pressed & (Button.A | Button.B | Button.START) != 0 { screen = .menu }
     case .calibration: calibrate(dt, pressed, mapping, raw)
     }
-    if screen == .flight {
+    if watchingLive { liveBasis = head }
+    if screen == .flight && !watchingLive {
       traffic.update(dt)
       propellerAngle = fmodf(propellerAngle + drone.render.rotor * 31 * dt, 2 * PI_F)
     }
     camera.update(screen == .flight ? dt : 0, drone.render, settings.vr, tracked, head)
   }
 
+  func watchLive() {
+    guard liveAvailable else { return }
+    watchingLive = true
+    liveSince = clock
+    screen = .flight
+    host?.recenterHead()
+  }
+
+  private func watch(_ pressed: Int) {
+    if pressed & Button.START != 0 { openMenu(); return }
+    if pressed & (Button.X | Button.B) != 0 {
+      watchingLive = false
+      show("SIMULATION", 1.2)
+    }
+    if pressed & (Button.R3 | Button.SELECT) != 0 {
+      host?.recenterHead()
+      show("VIEW RECENTERED", 1.2)
+    }
+  }
+
   private func fly(_ dt: Float, _ pad: PadState, _ pressed: Int) {
     if pressed & Button.START != 0 { openMenu(); return }
     if pressed & Button.B != 0 {
       drone.toggleReturnHome()
-      if drone.phase == .returnHome { show("RETURNING HOME") }
+      if drone.phase == .returnHome { show("RETURNING TO NEAREST DOCK") }
+      else if drone.phase == .flying { show("RETURN CANCELLED", 1.5) }
     }
     if pressed & Button.Y != 0 { camera.next(); show(camera.view.label) }
     if pressed & Button.X != 0 {
-      if liveAvailable { host?.exit(toLiveVideo: true) } else { show("NO LIVE CAMERA CONNECTED") }
+      if liveAvailable { watchLive() } else { show("NO LIVE CAMERA CONNECTED") }
     }
     if pressed & (Button.R3 | Button.SELECT) != 0 {
       camera.recenter(); host?.recenterHead()
@@ -124,7 +162,10 @@ final class Game {
     drone.yawSensitivity = Float(settings.sensitivity) / 100
     drone.windEnabled = settings.wind
     let before = drone.phase
-    if pressed & Button.A != 0 { drone.toggleTakeoffLanding() }
+    if pressed & Button.A != 0 {
+      if drone.phase == .landed && !drone.canTakeOff { show("BATTERY EMPTY - LET IT CHARGE ON A DOCK") }
+      drone.toggleTakeoffLanding()
+    }
     drone.update(dt, input)
     if drone.impact > 0 {
       host?.rumble((drone.impact / 9).clamped(0.2, 1))
@@ -132,8 +173,19 @@ final class Game {
     }
     if drone.crashes != crashes {
       crashes = drone.crashes
-      show("CRASH - RESETTING TO HOME", 3.4)
+      show("CRASHED - RESPAWNING AT NEAREST DOCK", 3.4)
     }
+    if drone.depletions != depletions {
+      depletions = drone.depletions
+      show("BATTERY DEAD - RESPAWNING AT NEAREST DOCK", 3.6)
+    }
+    if drone.autoReturns != autoReturns {
+      autoReturns = drone.autoReturns
+      show("LOW BATTERY - RETURNING TO NEAREST DOCK", 3)
+    }
+    let charging = drone.charging
+    if wasCharging && !charging && drone.onDock { show("FULLY CHARGED", 2) }
+    wasCharging = charging
     if before == .crashed && drone.phase == .landed { camera.snap(drone.pose.yaw) }
     if before == .landed && drone.phase == .takeoff { host?.recenterHead() }
   }
@@ -177,6 +229,7 @@ final class Game {
       host?.calibrationCleared()
       show("AUTOMATIC MAPPING RESTORED")
     case .restart:
+      watchingLive = false
       drone.reset(); camera.snap(0); host?.recenterHead()
       screen = .flight
     case .exit: host?.exit(toLiveVideo: false)
@@ -212,6 +265,11 @@ final class Game {
     case .shadows: s.shadows.toggle()
     case .wind: s.wind.toggle()
     case .sound: s.sound.toggle()
+    case .map:
+      s.map = cycle(s.map, by, 0, MapData.FILES.count - 1)
+      host?.settingsChanged()
+      host?.mapChanged()
+      return
     case .sensitivity: s.sensitivity = cycle(s.sensitivity, by * 10, 50, 150)
     case .deadzone: s.deadzone = cycle(s.deadzone, by * 2, 4, 30)
     case .spacing: s.lensSpacing = cycle(s.lensSpacing, by * 2, -10, 10)
@@ -241,3 +299,4 @@ final class Game {
     if screen == .flight && drone.airborne { show("CONTROLLER LOST - HOVERING", 4) }
   }
 }
+

@@ -124,12 +124,12 @@ final class Hud {
   private let pilotHelp = [
     "LEFT STICK", "UP / DOWN + TURN", "RIGHT STICK", "MOVE IN ANY DIRECTION", "LT / RT", "DOWN / UP",
     "LB / RB", "SLOWER / FASTER MODE", "D-PAD UP/DOWN", "CAMERA HEIGHT", "A", "TAKE OFF / LAND",
-    "B", "RETURN HOME", "X", "LIVE CAMERA", "Y", "CHANGE VIEW", "R3 / OPTIONS", "RECENTER VIEW", "MENU", "MENU",
+    "B", "RETURN TO DOCK", "X", "LIVE CAMERA", "Y", "CHANGE VIEW", "R3 / OPTIONS", "RECENTER VIEW", "MENU", "MENU",
   ]
   private let classicHelp = [
     "LEFT STICK", "FORWARD / BACK + TURN", "RIGHT STICK", "LOOK AROUND", "LT / RT", "DOWN / UP",
     "LB / RB", "SLIDE LEFT / RIGHT", "D-PAD LEFT/RIGHT", "FLIGHT MODE", "A", "TAKE OFF / LAND",
-    "B", "RETURN HOME", "X", "LIVE CAMERA", "Y", "CHANGE VIEW", "R3 / OPTIONS", "RECENTER VIEW", "MENU", "MENU",
+    "B", "RETURN TO DOCK", "X", "LIVE CAMERA", "Y", "CHANGE VIEW", "R3 / OPTIONS", "RECENTER VIEW", "MENU", "MENU",
   ]
 
   private typealias H = Hud
@@ -141,17 +141,23 @@ final class Hud {
     batch.begin()
     switch game.screen {
     case .flight:
-      flight(game)
-      if !game.settings.vr && game.controllerName == nil { sticks(touch) }
+      if game.watchingLive { live(game) } else {
+        flight(game)
+        if !game.settings.vr && game.controllerName == nil { sticks(touch) }
+      }
     case .menu: menu(game, pad, fps)
     case .controls: controls(game)
     case .calibration: calibration(game)
     }
     if let toast = game.toast {
-      let y: Float = game.screen == .flight ? -100 : 222
-      let w = Float(toast.count) * 10.5 + 28
-      batch.color(H.PANEL, 0.82); batch.rect(-w / 2, y - 5, w, 32)
-      batch.color(H.ACCENT); batch.text(toast, 0, y, 22, 0.5)
+      if game.screen == .flight {
+        let vr = game.settings.vr
+        tag(toast, 0, vr ? -112 : -H.HALF_HEIGHT + 40, vr ? 13 : 16, H.ACCENT, 0.5)
+      } else {
+        let w = Float(toast.count) * 10.5 + 28
+        batch.color(H.PANEL, 0.82); batch.rect(-w / 2, 217, w, 32)
+        batch.color(H.ACCENT); batch.text(toast, 0, 222, 22, 0.5)
+      }
     }
   }
 
@@ -159,61 +165,67 @@ final class Hud {
     batch.color(H.PANEL, 0.5); batch.rect(x, y, width, height)
   }
 
+  /// Small text with a faint backing, so it reads over sky and buildings without hiding much.
+  private func tag(_ text: String, _ x: Float, _ y: Float, _ size: Float, _ color: Int, _ align: Float) {
+    let width = Float(text.count) * size * 0.5
+    batch.color(H.PANEL, 0.35); batch.rect(x - width * align - 5, y - 3, width + 10, size + 6)
+    batch.color(color); batch.text(text, x, y, size, align)
+  }
+
+  /// Only what a pilot needs, small and in the corners, so nearly the whole view is the world:
+  /// mode and phase top left, battery top right, speed bottom left, height bottom right.
   private func flight(_ game: Game) {
+    // In a headset the corners of each lens are out of view, so the corners sit further in.
     let vr = game.settings.vr
-    let w = vr ? min(250, halfWidth * 0.76) : halfWidth - 28
-    let h: Float = vr ? 178 : H.HALF_HEIGHT - 18
+    let w = vr ? min(205, halfWidth * 0.6) : halfWidth - 14
+    let h: Float = vr ? 138 : H.HALF_HEIGHT - 12
+    let size: Float = vr ? 13 : 15
     let drone = game.drone, pose = drone.render
 
-    panel(-w, -h, 152, 50)
-    batch.color(H.ACCENT); batch.text(drone.mode.label, -w + 8, -h + 5, 19)
-    batch.color(H.WHITE); batch.text(drone.phase.label, -w + 8, -h + 25, 17)
+    tag("\(drone.mode.label)  \(drone.phase.label)", -w, -h, size, H.WHITE, 0)
 
-    panel(w - 128, -h, 128, 70)
     let battery = drone.battery
-    batch.color(battery < 10 ? H.DANGER : battery < 25 ? H.WARN : H.GOOD)
-    batch.text("BATT \(Int(ceil(battery)))%", w - 8, -h + 5, 19, 1)
-    batch.rect(w - 120, -h + 27, 112 * battery / 100, 4)
-    batch.color(H.MUTED); batch.text("HOME \(Int(drone.homeDistance))M", w - 8, -h + 38, 17, 1)
+    let batteryColor = battery < 10 ? H.DANGER : battery < 25 ? H.WARN : H.GOOD
+    var status = "\(Int(ceil(battery)))%"
+    if drone.charging { status += " CHARGING" }
+    else if drone.phase == .returnHome { status += " DOCK \(Int(drone.dockDistance))M" }
+    else {
+      let seconds = Int(drone.flightSecondsLeft)
+      status += " \(seconds / 60):\(seconds % 60 < 10 ? "0" : "")\(seconds % 60)"
+    }
+    tag(status, w, -h, size, batteryColor, 1)
+    batch.color(batteryColor, 0.9); batch.rect(w - 44, -h + size + 5, 44 * battery / 100, 2)
 
-    compass(game, -h)
-
-    panel(-w, h - 62, 120, 62)
-    batch.color(H.MUTED); batch.text("SPEED KM/H", -w + 8, h - 58, 15)
-    batch.color(H.WHITE); batch.text("\(javaRound(drone.speed * 3.6))", -w + 8, h - 40, 34)
-    panel(w - 120, h - 62, 120, 62)
-    batch.color(H.MUTED); batch.text("HEIGHT M", w - 8, h - 58, 15, 1)
+    tag("\(javaRound(drone.speed * 3.6)) KM/H", -w, h - size, size, H.WHITE, 0)
     let height = javaRound(drone.height * 10)
-    batch.color(H.WHITE); batch.text("\(height / 10).\(height % 10)", w - 8, h - 40, 34, 1)
+    tag("\(height / 10).\(height % 10) M", w, h - size, size, H.WHITE, 1)
 
-    radar(pose, 0, h - 34)
     if game.camera.view == .onboard { horizon(pose) }
 
     let blink = fmodf(game.clock, 0.8) < 0.5
-    if drone.phase == .landed {
-      batch.color(H.PANEL, 0.7); batch.rect(-120, -62, 240, 54)
-      batch.color(H.WHITE); batch.text("PRESS A TO TAKE OFF", 0, -57, 21, 0.5)
-      batch.color(H.MUTED)
-      batch.text(game.controllerName == nil && !vr ? "OR PUSH LEFT STICK UP" : "MENU: SETTINGS + CONTROLS", 0, -34, 17, 0.5)
+    let hint = h - size * 3.2
+    if drone.phase == .landed && drone.charging {
+      tag("CHARGING \(Int(ceil(battery)))%", 0, hint, size, H.ACCENT, 0.5)
+    } else if drone.phase == .landed {
+      tag(!drone.canTakeOff ? "BATTERY EMPTY" : game.controllerName == nil && !vr ? "FLY/LAND OR LEFT STICK UP" : "A: TAKE OFF", 0, hint, size, H.WHITE, 0.5)
     } else if blink && drone.obstacle < 14 {
-      batch.color(H.WARN); batch.text("OBSTACLE", 0, 62, 22, 0.5)
+      tag("OBSTACLE", 0, hint, size, H.WARN, 0.5)
     } else if blink && battery < 15 {
-      batch.color(H.DANGER); batch.text("LOW BATTERY", 0, 62, 22, 0.5)
+      tag("LOW BATTERY", 0, hint, size, H.DANGER, 0.5)
     }
-    if game.headSensorMissing { batch.color(H.WARN); batch.text("THIS PHONE HAS NO MOTION SENSOR", 0, -118, 17, 0.5) }
-    if game.controllerName == nil && vr { batch.color(H.WARN); batch.text("NO CONTROLLER - TAP FOR MENU", 0, 90, 17, 0.5) }
+    if game.headSensorMissing { tag("NO MOTION SENSOR", 0, -h, size, H.WARN, 0.5) }
+    if game.controllerName == nil && vr { tag("NO CONTROLLER - TAP FOR MENU", 0, h - size, size, H.WARN, 0.5) }
   }
 
-  private func compass(_ game: Game, _ top: Float) {
-    let span: Float = 62
-    let b = game.camera.basis
-    let heading = atan2(-b[8], b[10])
-    batch.color(H.PANEL, 0.4); batch.rect(-span - 6, top, span * 2 + 12, 30)
-    for k in 0..<24 {
-      let offset = wrapAngle(Float(k) * PI_F / 12 - heading) * 70
-      if abs(offset) > span { continue }
-      batch.color(H.WHITE, 0.8)
-      if k % 6 == 0 { batch.text(["N", "E", "S", "W"][k / 6], offset, top + 4, 18, 0.5) } else { batch.rect(offset - 1, top + 18, 2, 7) }
+  /// Live camera: a small label, and the controls for a few seconds after switching.
+  private func live(_ game: Game) {
+    let vr = game.settings.vr
+    let w = vr ? min(205, halfWidth * 0.6) : halfWidth - 14
+    let h: Float = vr ? 138 : H.HALF_HEIGHT - 12
+    let size: Float = vr ? 13 : 15
+    if game.liveHasVideo { tag("LIVE CAMERA", -w, -h, size, H.GOOD, 0) } else { tag("WAITING FOR VIDEO", 0, 0, size + 2, H.WARN, 0.5) }
+    if game.clock - game.liveSince < 5 {
+      tag(game.controllerName == nil ? "TAP: MENU" : "X OR B: SIMULATION   MENU: MENU", 0, h - size, size, H.MUTED, 0.5)
     }
   }
 
@@ -224,22 +236,6 @@ final class Hud {
     batch.line(-c, s - offset, -c * 0.3, s * 0.3 - offset, 2)
     batch.line(c * 0.3, -s * 0.3 - offset, c, -s - offset, 2)
     batch.rect(-2, -2, 4, 4)
-  }
-
-  private func radar(_ pose: DronePose, _ cx: Float, _ cy: Float) {
-    let radius: Float = 38, scale = radius / 170
-    batch.color(H.PANEL, 0.5)
-    for i in 0..<20 {
-      let a = Float(i) * PI_F / 10, b = Float(i + 1) * PI_F / 10
-      batch.triangle(cx, cy, cx + cos(a) * radius, cy + sin(a) * radius, cx + cos(b) * radius, cy + sin(b) * radius)
-    }
-    let c = cos(pose.yaw), s = sin(pose.yaw)
-    let dx = City.HOME_X - pose.x, dz = City.HOME_Z - pose.z
-    var rx = (dx * c + dz * s) * scale, ry = (-dx * s + dz * c) * scale
-    let d = hypot(rx, ry)
-    if d > radius - 3 { rx *= (radius - 3) / d; ry *= (radius - 3) / d }
-    batch.color(H.GOOD); batch.rect(cx + rx - 3, cy + ry - 3, 6, 6)
-    batch.color(H.WHITE); batch.triangle(cx - 5, cy + 5, cx + 5, cy + 5, cx, cy - 7)
   }
 
   private func sticks(_ touch: TouchSticks) {
@@ -292,6 +288,7 @@ final class Hud {
     batch.text(String((game.controllerName ?? "NO CONTROLLER").prefix(22)), menuHalf - 4, 162, 16, 1)
     batch.text("\(fps) FPS   A SELECT  B BACK", menuHalf - 4, 182, 16, 1)
     batch.text("SWIPE TO SCROLL", -menuHalf + 170, 182, 14)
+    batch.text("MAP DATA (C) OPENSTREETMAP CONTRIBUTORS", 0, 200, 12, 0.5)
   }
 
   private func stick(_ cx: Float, _ cy: Float, _ x: Float, _ y: Float) {
@@ -309,6 +306,7 @@ final class Hud {
     switch item {
     case .layout: return s.classicLayout ? "CLASSIC" : "PILOT"
     case .vr: return s.vr ? "VR HEADSET" : "FULL SCREEN"
+    case .map: return MapData.TITLES[s.map]
     case .invertClimb: return onOff(s.invertClimb)
     case .invertLook: return onOff(s.invertLook)
     case .head: return onOff(s.headTracking)
@@ -359,9 +357,9 @@ final class Hud {
 /// Port of QualityGovernor.kt with the levels from GpuProfile.kt.
 struct QualityLevel { let detailRange: Float; let shadowDetailRange: Float; let carRange: Float; let shadows: Bool; let relief: Bool }
 let QUALITY_LEVELS = [
-  QualityLevel(detailRange: 210, shadowDetailRange: 120, carRange: 340, shadows: true, relief: true),
-  QualityLevel(detailRange: 125, shadowDetailRange: 55, carRange: 230, shadows: true, relief: true),
-  QualityLevel(detailRange: 90, shadowDetailRange: 0, carRange: 170, shadows: false, relief: false),
+  QualityLevel(detailRange: 210, shadowDetailRange: 120, carRange: 300, shadows: true, relief: true),
+  QualityLevel(detailRange: 125, shadowDetailRange: 55, carRange: 210, shadows: true, relief: true),
+  QualityLevel(detailRange: 90, shadowDetailRange: 0, carRange: 150, shadows: false, relief: false),
 ]
 
 final class QualityGovernor {

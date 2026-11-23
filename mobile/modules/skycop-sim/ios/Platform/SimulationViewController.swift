@@ -6,12 +6,35 @@ enum Session {
   static let settings = Settings()
   static var game: Game?
   static var switchedToLive = false
-  static var city: City?
+  /// The built city for the current map; building one takes a moment, so it is kept.
+  private static var city: City?
+  private static var cityMap = -1
+
+  static func city(_ index: Int) -> City? {
+    if let city, cityMap == index { return city }
+    city = nil
+    let name = MapData.FILES[max(0, min(index, MapData.FILES.count - 1))]
+    // The maps ship as resources of this module; with a static framework they land in the app bundle.
+    var bundles = [Bundle.main, Bundle(for: SimulationViewController.self)]
+    if let url = Bundle(for: SimulationViewController.self).url(forResource: "SkyCopMaps", withExtension: "bundle"), let b = Bundle(url: url) { bundles.insert(b, at: 0) }
+    if let url = Bundle.main.url(forResource: "SkyCopMaps", withExtension: "bundle"), let b = Bundle(url: url) { bundles.insert(b, at: 0) }
+    for bundle in bundles {
+      guard let url = bundle.url(forResource: name, withExtension: "skymap"), let data = try? Data(contentsOf: url),
+            let map = try? MapData([UInt8](data)) else { continue }
+      let built = City(map)
+      city = built
+      cityMap = index
+      return built
+    }
+    NSLog("SkyCop: map %@ is missing from the app bundle", name)
+    return nil
+  }
 }
 
 /// Full-screen landscape host for the simulator.
 final class SimulationViewController: UIViewController, GameHost {
   private let liveAvailable: Bool
+  private let startLive: Bool
   private let onFinish: (String) -> Void
   private let gamepad = GamepadInput()
   private let head = HeadTracker()
@@ -22,8 +45,9 @@ final class SimulationViewController: UIViewController, GameHost {
   private var dragStartY: CGFloat = 0, dragLastY: CGFloat = 0, dragged = false
   private let defaults = UserDefaults.standard
 
-  init(liveAvailable: Bool, onFinish: @escaping (String) -> Void) {
+  init(liveAvailable: Bool, startLive: Bool, onFinish: @escaping (String) -> Void) {
     self.liveAvailable = liveAvailable
+    self.startLive = startLive
     self.onFinish = onFinish
     super.init(nibName: nil, bundle: nil)
     modalPresentationStyle = .fullScreen
@@ -51,21 +75,20 @@ final class SimulationViewController: UIViewController, GameHost {
     view.addSubview(metal)
     metalView = metal
 
-    let city = Session.city ?? City()
-    Session.city = city
     let game: Game
     if let kept = Session.game {
       kept.attach(self, live: liveAvailable)
       game = kept
-      if !Session.switchedToLive { game.openMenu() }
+      if !Session.switchedToLive && !startLive { game.openMenu() }
     } else {
+      guard let city = Session.city(Session.settings.map) else { finish("error"); return }
       game = Game(city: city, settings: Session.settings, host: self, liveAvailable: liveAvailable)
       game.camera.snap(0)
       Session.game = game
     }
     Session.switchedToLive = false
     do {
-      let renderer = try SimRenderer(view: metal, game: game, gamepad: gamepad, head: head, audio: audio)
+      let renderer = try SimRenderer(view: metal, game: game, gamepad: gamepad, head: head, audio: audio, startLive: startLive)
       self.renderer = renderer
       metal.delegate = renderer
       renderer.mtkView(metal, drawableSizeWillChange: metal.drawableSize)
@@ -167,4 +190,14 @@ final class SimulationViewController: UIViewController, GameHost {
   func calibrationCleared() { gamepad.clearMapping() }
   func recenterHead() { head.recenter() }
   func rumble(_ strength: Float) { gamepad.rumble(strength) }
+
+  func mapChanged() {
+    DispatchQueue.main.async {
+      guard let renderer = self.renderer, let city = Session.city(Session.settings.map) else { return }
+      let game = Game(city: city, settings: Session.settings, host: self, liveAvailable: Session.game?.liveAvailable ?? false)
+      game.camera.snap(0)
+      Session.game = game
+      renderer.replace(game)
+    }
+  }
 }

@@ -8,4 +8,4 @@ KOTLINC="${KOTLINC:-$STUDIO/plugins/Kotlin/kotlinc/bin/kotlinc}"
 OUT="$(mktemp -d)"
 trap 'rm -rf "$OUT"' EXIT
 sh "$KOTLINC" "$HERE"/../android/src/main/java/com/skycop/sim/core/*.kt "$HERE/CoreTests.kt" -include-runtime -nowarn -d "$OUT/tests.jar"
-"$JAVA_HOME/bin/java" -jar "$OUT/tests.jar"
+"$JAVA_HOME/bin/java" -Dskycop.maps="$HERE/../assets/maps" -jar "$OUT/tests.jar"

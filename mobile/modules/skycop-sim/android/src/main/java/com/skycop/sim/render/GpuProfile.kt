@@ -37,7 +37,7 @@ internal class GpuProfile(val renderer: String) {
 internal class QualityLevel(val detailRange: Float, val shadowDetailRange: Float, val carRange: Float, val shadows: Boolean, val relief: Boolean)
 
 internal val QUALITY_LEVELS = arrayOf(
-    QualityLevel(210f, 120f, 340f, true, true),
-    QualityLevel(125f, 55f, 230f, true, true),
-    QualityLevel(90f, 0f, 170f, false, false),
+    QualityLevel(210f, 120f, 300f, true, true),
+    QualityLevel(125f, 55f, 210f, true, true),
+    QualityLevel(90f, 0f, 150f, false, false),
 )

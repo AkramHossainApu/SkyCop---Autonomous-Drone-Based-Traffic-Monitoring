@@ -60,6 +60,7 @@ void main() {
     else if (face == 1) tangent = vec3(0.0, 0.0, 1.0);
     else if (face == 2) tangent = vec3(1.0, 0.0, 0.0);
     else if (face == 3) tangent = vec3(-1.0, 0.0, 0.0);
+    else if (face == 6) tangent = normalize(vec3(aNormal.z, 0.0, -aNormal.x));
     else { tangent = vec3(1.0, 0.0, 0.0); bitangent = vec3(0.0, 0.0, face == 4 ? -1.0 : 1.0); }
 
     int material = int(aColor.a * 255.0 + 0.5);
@@ -67,7 +68,7 @@ void main() {
     if (material >= ${Mat.TEXTURED}) {
         vec2 at = vec2(dot(aPosition, tangent), dot(aPosition, bitangent));
         // Floors are counted from the top of the curb.
-        if (face < 4) at.y -= ${City.CURB};
+        if (face < 4 || face == 6) at.y -= ${City.CURB};
         vUv = at / TILE[material - ${Mat.TEXTURED}];
     }
     vTangent = rotation * turn(tangent);
@@ -108,50 +109,17 @@ float band(float distanceFromCenter, float halfWidth, float px) {
     return clamp((halfWidth - abs(distanceFromCenter)) / px + 0.5, 0.0, 1.0) * min(1.0, 2.0 * halfWidth / px);
 }
 
+// Bare ground between the mapped roads and buildings: dusty earth with patches of grass.
 vec3 groundColor(vec3 p, vec2 gradX, vec2 gradY) {
-    float wx = max(abs(gradX.x) + abs(gradY.x), 0.002);
-    float wz = max(abs(gradX.y) + abs(gradY.y), 0.002);
-    float dx = p.x - floor(p.x / ${City.PITCH} + 0.5) * ${City.PITCH};
-    float dz = p.z - floor(p.z / ${City.PITCH} + 0.5) * ${City.PITCH};
-    float limit = ${City.BOUNDS + 18f};
-    bool inside = abs(p.x) < limit && abs(p.z) < limit;
-    bool alongZ = inside && abs(dx) < ${City.ROAD_HALF} && abs(p.x) < ${City.HALF + City.ROAD_HALF};
-    bool alongX = inside && abs(dz) < ${City.ROAD_HALF} && abs(p.z) < ${City.HALF + City.ROAD_HALF};
-
-    float size = alongZ || alongX ? ${Tex.ASPHALT.width} : ${Tex.GRASS.width};
-    float layer = alongZ || alongX ? ${Tex.ASPHALT.ordinal}.0 : ${Tex.GRASS.ordinal}.0;
-    vec3 close = textureGrad(uAlbedo, vec3(p.xz / size, layer), gradX / size, gradY / size).rgb;
-    // The same texture at a much larger scale hides the repeat from the air.
-    float large = size * 7.3;
-    float broad = textureGrad(uAlbedo, vec3(p.xz / large, layer), gradX / large, gradY / large).g;
-    if (!alongZ && !alongX) return close * (0.72 + broad * 0.6);
-    vec3 road = close * (0.78 + broad * 0.7);
-    if (alongZ && alongX) return road * 0.94;
-
-    float across = alongZ ? dx : dz;
-    float along = alongZ ? dz : dx;
-    float wa = alongZ ? wx : wz;
-    float wl = alongZ ? wz : wx;
-    float t = abs(along);
-    float side = abs(across);
-
-    // Darker wheel tracks in each lane, and a gutter by the curb.
-    float lane = side < 3.83 ? side - 2.05 : side - 5.6;
-    road *= 1.0 - 0.13 * max(0.0, 1.0 - abs(abs(lane) - 0.8) * 2.6);
-    road *= 1.0 - 0.22 * smoothstep(7.6, 8.0, side);
-
-    vec3 white = vec3(0.86, 0.87, 0.84) * clamp(0.62 + close.g * 1.1, 0.0, 1.0);
-    float open = smoothstep(12.0, 12.0 + wl + 0.01, t);
-    road = mix(road, vec3(0.86, 0.66, 0.2), max(band(side - 0.16, 0.06, wa), 0.0) * open);
-    float dash = band(abs(mod(p.x * float(alongX) + p.z * float(alongZ), 8.0) - 4.0), 1.5, wl);
-    road = mix(road, white, band(side - 3.83, 0.07, wa) * dash * open);
-    road = mix(road, white, band(side - 7.55, 0.08, wa) * open);
-    float stripe = band(mod(across + 0.6, 1.2) - 0.6, 0.3, wa);
-    stripe = mix(stripe, 0.5, clamp(wa - 0.4, 0.0, 1.0));
-    road = mix(road, white, band(t - 9.7, 1.3, wl) * stripe * step(side, 7.2));
-    float approaching = alongZ ? step(0.0, dx * dz) : step(dx * dz, 0.0);
-    road = mix(road, white, band(t - 11.7, 0.22, wl) * approaching * step(0.35, side) * step(side, 7.4));
-    return road;
+    float g = ${Tex.GRASS.width};
+    vec3 grass = textureGrad(uAlbedo, vec3(p.xz / g, ${Tex.GRASS.ordinal}.0), gradX / g, gradY / g).rgb;
+    float d = ${Tex.CONCRETE.width};
+    vec3 dirt = textureGrad(uAlbedo, vec3(p.xz / d, ${Tex.CONCRETE.ordinal}.0), gradX / d, gradY / d).rgb * vec3(0.93, 0.85, 0.72);
+    // The same textures at a much larger scale break up the repeat and make the patches.
+    float large = 37.0;
+    float broad = textureGrad(uAlbedo, vec3(p.xz / large, ${Tex.GRASS.ordinal}.0), gradX / large, gradY / large).g;
+    float patches = smoothstep(0.38, 0.62, broad);
+    return mix(dirt, grass * 0.92, patches * 0.6) * (0.82 + broad * 0.36);
 }
 
 // The sky above the horizon, a suggestion of the city below it.

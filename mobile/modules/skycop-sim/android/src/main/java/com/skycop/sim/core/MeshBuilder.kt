@@ -54,6 +54,8 @@ class MeshBuilder {
         val x = abs(nx); val y = abs(ny); val z = abs(nz)
         return when {
             y >= x && y >= z -> if (ny >= 0) 4 else 5
+            // A wall at an angle, like most real building footprints: the texture follows the wall.
+            y < 0.2f && min(x, z) > 0.03f -> 6
             x >= z -> if (nx >= 0) 0 else 1
             else -> if (nz >= 0) 2 else 3
         }

@@ -1,7 +1,6 @@
 import 'react-native-url-polyfill/auto';
 import { StatusBar } from 'expo-status-bar';
 import * as ScreenOrientation from 'expo-screen-orientation';
-import { setVisibilityAsync } from 'expo-navigation-bar';
 import { useEffect, useRef, useState } from 'react';
 import { Image, Linking, Platform, Pressable, ScrollView, StatusBar as NativeStatusBar, StyleSheet, Text, TextInput, View } from 'react-native';
 import SkyCopSim, { type ControllerButton } from './modules/skycop-sim';
@@ -44,13 +43,9 @@ async function lock(orientation: ScreenOrientation.OrientationLock) {
 export default function App() {
   const link = useCameraLink();
   const [typed, setTyped] = useState(() => SkyCopSim?.loadValue(CODE_KEY) ?? '');
-  const [vr, setVr] = useState(false);
-  const [hint, setHint] = useState(true);
   const [notice, setNotice] = useState('');
   const [scanning, setScanning] = useState(false);
   const simulationOpen = useRef(false);
-  const leaveRect = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
-  const hintShownAt = useRef(0);
   const live = link.status === 'live' && link.stream !== null;
   const liveRef = useRef(live);
   liveRef.current = live;
@@ -85,47 +80,33 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function enterVr() {
-    if (!liveRef.current) return;
-    await lock(ScreenOrientation.OrientationLock.LANDSCAPE);
-    setVr(true);
-    setHint(true);
-    void setVisibilityAsync('hidden').catch(() => undefined);
-  }
+  // The native VR view shows the live camera too, so it always knows the current stream.
+  useEffect(() => {
+    SkyCopSim?.setLiveStream(live && link.stream ? link.stream.toURL() : null);
+  }, [live, link.stream]);
 
-  async function exitVr() {
-    setVr(false);
-    void setVisibilityAsync('visible').catch(() => undefined);
-    await lock(ScreenOrientation.OrientationLock.PORTRAIT_UP);
-  }
-
-  async function openSimulation() {
+  async function openVr(startLive: boolean) {
     if (!SkyCopSim || simulationOpen.current) return;
+    if (startLive && !liveRef.current) return;
     simulationOpen.current = true;
     setNotice('');
     try {
       // iOS only rotates a presented screen when the app itself allows landscape.
       if (Platform.OS === 'ios') await ScreenOrientation.unlockAsync().catch(() => undefined);
-      const result = await SkyCopSim.openSimulation(liveRef.current);
-      if (result === 'live' && liveRef.current) {
-        await enterVr();
-        return;
-      }
-      await exitVr();
-      if (result === 'error') setNotice('The 3D simulation could not start its graphics on this device.');
+      const result = await SkyCopSim.openSimulation(liveRef.current, startLive);
+      if (result === 'error') setNotice('The VR view could not start its graphics on this device.');
     } catch {
-      await exitVr();
-      setNotice('Could not open the simulation. Try again.');
+      setNotice('Could not open the VR view. Try again.');
     } finally {
+      await lock(ScreenOrientation.OrientationLock.PORTRAIT_UP);
       simulationOpen.current = false;
     }
   }
 
-  // Gamepad X switches between live video and the simulation; B leaves the headset view.
+  // Gamepad X opens the simulation from the home screen.
   const buttonRef = useRef<(button: ControllerButton) => void>(() => undefined);
   buttonRef.current = (button) => {
-    if (button === 'x') void openSimulation();
-    if (button === 'b' && vr) void exitVr();
+    if (button === 'x') void openVr(false);
   };
   useEffect(() => {
     if (!SkyCopSim) return undefined;
@@ -133,61 +114,6 @@ export default function App() {
     void SkyCopSim.watchControllerButtons().catch(() => undefined);
     return () => subscription.remove();
   }, []);
-
-  useEffect(() => {
-    if (!vr || !hint) return undefined;
-    const timer = setTimeout(() => setHint(false), 3500);
-    return () => clearTimeout(timer);
-  }, [vr, hint]);
-
-  useEffect(() => {
-    if (vr && !live) void exitVr();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [live]);
-
-  if (vr && link.stream) {
-    return (
-      <View
-        style={styles.vr}
-        onTouchStart={() => {
-          if (!hint) hintShownAt.current = Date.now();
-          setHint(true);
-        }}
-        onTouchEnd={(event) => {
-          // Hit-test the button here as well: on iOS the native video layers can keep a landscape
-          // Pressable from receiving the press.
-          const rect = leaveRect.current;
-          const { pageX, pageY } = event.nativeEvent;
-          if (hint && rect && Date.now() - hintShownAt.current > 250 &&
-            pageX >= rect.x && pageX <= rect.x + rect.width && pageY >= rect.y && pageY <= rect.y + rect.height) {
-            void exitVr();
-          }
-        }}
-      >
-        <StatusBar hidden />
-        {/* Native video views would otherwise take the touches meant for the controls. */}
-        <View style={styles.vrEye} pointerEvents="none"><RemoteVideo stream={link.stream} fit="contain" /></View>
-        <View style={styles.vrDivider} pointerEvents="none" />
-        <View style={styles.vrEye} pointerEvents="none"><RemoteVideo stream={link.stream} fit="contain" /></View>
-        {hint && (
-          <View style={styles.vrHint} pointerEvents="box-none">
-            <Text style={styles.vrHintText}>Gamepad X: simulation · B: leave</Text>
-            <Pressable
-              accessibilityRole="button"
-              onPress={() => void exitVr()}
-              onLayout={(event) => {
-                const target = event.target as unknown as { measureInWindow?: (callback: (x: number, y: number, w: number, h: number) => void) => void };
-                target.measureInWindow?.((x, y, width, height) => { leaveRect.current = { x, y, width, height }; });
-              }}
-              style={styles.vrExit}
-            >
-              <Text style={styles.vrExitText}>Leave VR</Text>
-            </Pressable>
-          </View>
-        )}
-      </View>
-    );
-  }
 
   const status = STATUS[link.status];
   const finding = live
@@ -218,7 +144,7 @@ export default function App() {
 
         <View style={styles.panel}>
           <View style={styles.viewport}>
-            {link.stream ? <RemoteVideo stream={link.stream} fit="cover" /> : (
+            {link.stream ? <RemoteVideo stream={link.stream} fit="contain" /> : (
               <View style={styles.viewportEmpty}>
                 <Text style={styles.viewportText}>{link.status === 'idle' ? 'No camera connected' : 'Waiting for video…'}</Text>
               </View>
@@ -229,7 +155,7 @@ export default function App() {
             <Pressable
               accessibilityRole="button"
               disabled={!live}
-              onPress={() => void enterVr()}
+              onPress={() => void openVr(true)}
               style={({ pressed }) => [styles.button, styles.buttonPrimary, !live && styles.disabled, pressed && styles.pressed]}
             >
               <Text style={[styles.buttonText, styles.buttonPrimaryText]}>Watch in VR</Text>
@@ -286,7 +212,7 @@ export default function App() {
             <Text style={styles.h2} accessibilityRole="header">Flight simulation</Text>
             <Text style={styles.help}>Fly the drone through the city in VR with a gamepad.</Text>
           </View>
-          <Pressable accessibilityRole="button" onPress={() => void openSimulation()} style={({ pressed }) => [styles.button, pressed && styles.pressed]}>
+          <Pressable accessibilityRole="button" onPress={() => void openVr(false)} style={({ pressed }) => [styles.button, pressed && styles.pressed]}>
             <Text style={styles.buttonText}>Open</Text>
           </Pressable>
         </View>
@@ -369,11 +295,4 @@ const styles = StyleSheet.create({
   simPanel: { flexDirection: 'row', alignItems: 'center', gap: 16 },
   simText: { flex: 1 },
   footer: { color: color.faint, fontSize: 12, lineHeight: 17, marginTop: 8 },
-  vr: { flex: 1, flexDirection: 'row', backgroundColor: '#000' },
-  vrEye: { flex: 1, overflow: 'hidden' },
-  vrDivider: { width: 2, backgroundColor: '#000' },
-  vrHint: { position: 'absolute', top: 16, left: 0, right: 0, alignItems: 'center', gap: 10, zIndex: 10, elevation: 10 },
-  vrHintText: { color: '#fff', fontSize: 13, backgroundColor: 'rgba(0,0,0,0.6)', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 14, overflow: 'hidden' },
-  vrExit: { height: 36, paddingHorizontal: 16, borderRadius: 18, borderWidth: 1, borderColor: 'rgba(255,255,255,0.5)', backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center' },
-  vrExitText: { color: '#fff', fontSize: 13, fontWeight: '600' },
 });

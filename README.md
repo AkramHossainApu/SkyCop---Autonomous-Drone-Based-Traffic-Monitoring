@@ -1,6 +1,6 @@
 # SkyCop
 
-SkyCop streams a live drone camera from a web page to the SkyCop phone app, which shows it side by side for a VR headset. The app also contains a VR flight simulation of the drone over a city with live traffic. The app runs on Android and iOS.
+SkyCop streams a live drone camera from a web page to the SkyCop phone app, which shows it side by side for a VR headset. The app also contains a VR flight simulation of the drone over real parts of Dhaka (Bashundhara R/A and Mohammadpur, built from OpenStreetMap) with live traffic. The app runs on Android and iOS.
 
 ## How it works
 
@@ -16,7 +16,7 @@ Guest Wi-Fi, client isolation and some firewalls block device-to-device connecti
 
 ## Flight simulation
 
-Tap **Open** next to Flight simulation in the app. It is a native engine (Kotlin + OpenGL ES on Android, Swift + Metal on iOS) with 250 Hz flight physics, head tracking, gamepad support, and procedurally painted textures. When a live feed is connected, gamepad **X** switches between the simulation and the live video. See [mobile/README.md](mobile/README.md#flight-simulation) for the controls.
+Tap **Open** next to Flight simulation in the app. It is a native engine (Kotlin + OpenGL ES on Android, Swift + Metal on iOS) with 250 Hz flight physics, head tracking, gamepad support, and procedurally painted textures. The live camera view runs in the same VR renderer, so the whole picture shows whichever way the camera is held, and gamepad **X** switches between the simulation and the live video. See [mobile/README.md](mobile/README.md#flight-simulation) for the controls.
 
 ## Run the website locally
 

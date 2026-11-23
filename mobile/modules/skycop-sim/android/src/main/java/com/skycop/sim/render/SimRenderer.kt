@@ -3,6 +3,7 @@ package com.skycop.sim.render
 import android.opengl.GLES30.*
 import android.opengl.GLSurfaceView
 import android.util.Log
+import com.skycop.sim.LiveFeed
 import com.skycop.sim.Session
 import com.skycop.sim.audio.RotorAudio
 import com.skycop.sim.core.*
@@ -19,11 +20,13 @@ internal class SimRenderer(
     private val settings: Settings,
     private val host: GameHost,
     private val liveAvailable: Boolean,
+    private var startLive: Boolean,
     private val gamepad: GamepadInput,
     private val head: HeadTracker,
     private val touch: TouchSticks,
     private val audio: RotorAudio,
     private val refreshRate: () -> Float,
+    private val loadMap: (Int) -> MapData,
     private val onFatal: (Throwable) -> Unit,
 ) : GLSurfaceView.Renderer {
 
@@ -46,6 +49,7 @@ internal class SimRenderer(
     private var hud: Hud? = null
     private var hudBatch: HudBatch? = null
     private var presenter: Presenter? = null
+    private var live: LiveScreen? = null
     private var profile: GpuProfile? = null
     private val target = RenderTarget()
     private val governor = QualityGovernor()
@@ -65,6 +69,22 @@ internal class SimRenderer(
     @Volatile private var pauseRequested = false
     @Volatile private var backRequested = false
     @Volatile private var resumed = true
+    @Volatile private var mapRequested = false
+
+    /** Called when the pilot picks another map: the next frame builds it and starts a flight there. */
+    fun requestMap() {
+        mapRequested = true
+    }
+
+    private fun switchMap() {
+        val city = Session.city(settings.map, loadMap)
+        val next = Game(city, settings, host, liveAvailable)
+        next.camera.snap(0f)
+        Session.game = next
+        game = next
+        world?.load(city)
+        resumed = true
+    }
 
     fun tap(x: Float, y: Float) {
         tapX = x; tapY = y
@@ -99,7 +119,7 @@ internal class SimRenderer(
 
     override fun onSurfaceCreated(unused: GL10?, config: EGLConfig?) {
         try {
-            val city = game?.city ?: City()
+            val city = game?.city ?: Session.city(settings.map, loadMap)
             if (game == null) {
                 game = Game(city, settings, host, liveAvailable).also {
                     // Settle camera and interpolation before the first visible frame.
@@ -114,6 +134,7 @@ internal class SimRenderer(
             hudBatch = batch
             hud = Hud(batch)
             presenter = Presenter()
+            live = LiveScreen()
             target.forget()
             resumed = true
             failed = false
@@ -145,6 +166,10 @@ internal class SimRenderer(
     }
 
     private fun frame() {
+        if (mapRequested) {
+            mapRequested = false
+            switchMap()
+        }
         val game = game ?: return
         val world = world ?: return
         val hud = hud ?: return
@@ -192,11 +217,16 @@ internal class SimRenderer(
             pressed = pressed or handleTap(game, hud)
         }
 
+        game.liveAvailable = LiveFeed.available
+        if (startLive) {
+            startLive = false
+            game.watchLive()
+        }
         val tracked = settings.headTracking && settings.vr && head.available
         head.read(headPose, tracked)
         game.update(dt, pad, pressed, gamepad.mapping, gamepad.raw, headPose, tracked)
         game.headSensorMissing = settings.headTracking && settings.vr && !head.available
-        inFlight = game.screen == Screen.FLIGHT
+        inFlight = game.screen == Screen.FLIGHT && !game.watchingLive
         vr = settings.vr
         audio.set(game.drone.render.rotor, settings.sound && inFlight)
 
@@ -213,18 +243,31 @@ internal class SimRenderer(
         val aspect = screenWidth.toFloat() / eyes / screenHeight
         val tanHalf = if (settings.vr) tan(43f * DEG) else tan(31f * DEG)
 
-        world.prepare(game, QUALITY_LEVELS[governor.level])
+        val live = live
+        val watching = game.watchingLive && live != null
+        if (watching) {
+            live!!.upload()
+            game.liveHasVideo = live.hasVideo
+        } else {
+            world.prepare(game, QUALITY_LEVELS[governor.level])
+        }
         hud.build(game, pad, aspect, governor.fps, touch)
 
         target.bindScene()
-        val basis = game.camera.basis; val eye = game.camera.eye
+        if (watching) live!!.clear()
+        val basis = if (watching) game.liveBasis else game.camera.basis
+        val eye = game.camera.eye
         for (i in 0 until eyes) {
             glViewport(i * eyeWidth, 0, eyeWidth, usedHeight)
             val offset = if (eyes == 1) 0f else (i * 2 - 1) * EYE_OFFSET
-            world.drawEye(
-                basis, eye[0] + basis[0] * offset, eye[1] + basis[1] * offset, eye[2] + basis[2] * offset,
-                tanHalf, aspect,
-            )
+            if (watching) {
+                live!!.drawEye(basis, basis[0] * offset, basis[1] * offset, basis[2] * offset, tanHalf, aspect, settings.vr)
+            } else {
+                world.drawEye(
+                    basis, eye[0] + basis[0] * offset, eye[1] + basis[1] * offset, eye[2] + basis[2] * offset,
+                    tanHalf, aspect,
+                )
+            }
         }
         target.resolve(usedWidth, usedHeight)
 
@@ -251,8 +294,7 @@ internal class SimRenderer(
     private fun lensShift(eye: Int) = if (settings.vr) (eye * 2 - 1) * settings.lensSpacing / 100f else 0f
 
     private fun handleTap(game: Game, hud: Hud): Int {
-        if (game.screen == Screen.FLIGHT) return if (settings.vr) Button.START else 0
-        if (game.screen != Screen.MENU) {
+        if (game.screen != Screen.FLIGHT && game.screen != Screen.MENU) {
             game.back()
             return 0
         }
@@ -270,7 +312,10 @@ internal class SimRenderer(
             val k = (1 + LENS_A * r2 + LENS_B * r2 * r2) / (1 + LENS_A + LENS_B)
             x *= k; y *= k
         }
-        val row = hud.menuRowAt(x * Hud.HALF_HEIGHT * aspect / hud.scale, y * Hud.HALF_HEIGHT / hud.scale)
+        val hudX = x * Hud.HALF_HEIGHT * aspect / hud.scale
+        val hudY = y * Hud.HALF_HEIGHT / hud.scale
+        if (game.screen == Screen.FLIGHT) return if (settings.vr || game.watchingLive) Button.START else 0
+        val row = hud.menuRowAt(hudX, hudY)
         if (row >= 0) game.activate(row)
         return 0
     }
@@ -283,6 +328,7 @@ internal class SimRenderer(
                 "phase=${d.phase} mode=${d.mode} x=${p.x} y=${p.y} z=${p.z} yaw=${p.yaw} speed=${d.speed} " +
                 "forward=${-b[8]},${-b[9]},${-b[10]} side=${b[1]} eye=${e[0]},${e[1]},${e[2]} " +
                 "view=${game.camera.view} gimbal=${game.camera.gimbal} pad=${game.controllerName} " +
+                "live=${game.watchingLive} video=${game.liveHasVideo} liveForward=${-game.liveBasis[8]},${-game.liveBasis[9]},${-game.liveBasis[10]} " +
                 "l=${pad.leftX},${pad.leftY} r=${pad.rightX},${pad.rightY} t=${pad.leftTrigger},${pad.rightTrigger}",
         )
     }

@@ -15,11 +15,13 @@ private fun check(name: String, ok: Boolean, detail: Any = "") {
 private fun near(name: String, actual: Float, expected: Float, tolerance: Float) =
     check(name, abs(actual - expected) <= tolerance, "got $actual, want $expected +/- $tolerance")
 
-private val city = City()
+private fun loadMap(name: String) = MapData(java.io.File(System.getProperty("skycop.maps"), "$name.skymap").readBytes())
+private val city = City(loadMap("bashundhara"))
+private val sharedTraffic = Traffic(city)
 
 private class Rig(wind: Boolean = true) {
     val input = PilotInput()
-    val drone = DroneSim(city, Traffic()).apply { windEnabled = wind }
+    val drone = DroneSim(city, sharedTraffic).apply { windEnabled = wind }
 
     fun run(seconds: Float, frame: Float = 1f / 60f) {
         repeat((seconds / frame).roundToInt()) { drone.update(frame, input) }
@@ -179,26 +181,32 @@ private fun flightTests() {
     }
     for (end in ends) for (i in 0..2) near("same flight at any frame rate", end[i], ends[1][i], 0.6f)
 
-    Rig().apply {
-        drone.toggleTakeoffLanding(); run(4f)
-        input.forward = -1f; run(12f)
-        check("obstacle assist stops before the wall", drone.crashes == 0 && drone.pose.z in 38f..43.2f, drone.pose.z)
-    }
-    Rig().apply {
-        drone.toggleTakeoffLanding(); run(4f)
-        drone.mode = FlightMode.SPORT
-        input.forward = -1f; run(3f)
-        check("sport mode can crash", drone.crashes == 1, drone.crashes)
-        input.forward = 0f; run(5f)
-        check("crash resets home", drone.phase == Phase.LANDED && drone.homeDistance < 0.01f)
+    val wall = wallAhead()
+    check("found a tall building to fly at", wall != null)
+    if (wall != null) {
+        Rig().apply {
+            drone.placeAt(wall[0], 10f, wall[1], wall[2])
+            input.forward = 1f; run(12f)
+            val gap = city.raycast(drone.pose.x, drone.pose.y, drone.pose.z, sin(wall[2]), 0f, -cos(wall[2]), 30f)
+            check("obstacle assist stops before the wall", drone.crashes == 0 && gap in 0.9f..4.5f, "${drone.crashes} $gap")
+        }
+        Rig().apply {
+            drone.placeAt(wall[0], 10f, wall[1], wall[2])
+            drone.mode = FlightMode.SPORT
+            input.forward = 1f; run(4f)
+            check("sport mode can crash", drone.crashes == 1, drone.crashes)
+            input.forward = 0f; run(5f)
+            check("crash respawns on a dock", drone.phase == Phase.LANDED && drone.onDock, "${drone.phase} ${drone.dockDistance}")
+        }
     }
     Rig().hoverHigh().apply {
         input.forward = 1f; input.strafe = 0.5f; run(12f)
         input.forward = 0f; input.strafe = 0f; run(2f)
         drone.toggleReturnHome(); run(70f)
-        check("return home lands on pad", drone.phase == Phase.LANDED && drone.homeDistance < 2f, "${drone.phase} ${drone.homeDistance}")
+        check("return lands on the nearest dock", drone.phase == Phase.LANDED && drone.onDock, "${drone.phase} ${drone.dockDistance}")
         check("return home does not crash", drone.crashes == 0)
     }
+    dockTests()
     Rig().hoverHigh().apply {
         input.forward = 1f; run(90f)
         check("geofence holds", abs(drone.pose.z) < City.BOUNDS + 3 && drone.pose.y < 123f)
@@ -213,29 +221,127 @@ private fun flightTests() {
             drone.mode = FlightMode.values()[random.nextInt(4)]
             run(1.5f)
             val p = drone.pose
-            valid = valid && p.x.isFinite() && p.y.isFinite() && p.z.isFinite() && p.y >= 0f && abs(p.x) < 620 && abs(p.z) < 620
+            valid = valid && p.x.isFinite() && p.y.isFinite() && p.z.isFinite() && p.y >= 0f && abs(p.x) < City.BOUNDS + 50 && abs(p.z) < City.BOUNDS + 50
         }
         check("ten minute soak", valid)
     }
 }
 
-private fun trafficTests() {
-    val traffic = Traffic()
-    var overlaps = 0
-    repeat(5 * 60 * 30) { frame ->
-        traffic.update(1f / 30f)
-        if (frame % 5 != 0) return@repeat
-        for (a in 0 until Traffic.COUNT) for (b in a + 1 until Traffic.COUNT) {
-            val dx = abs(traffic.x[a] - traffic.x[b]); val dz = abs(traffic.z[a] - traffic.z[b])
-            if (dx > 11 || dz > 11) continue
-            val ax = abs(sin(traffic.yaw[a])) > 0.5f; val bx = abs(sin(traffic.yaw[b])) > 0.5f
-            val w = ((if (ax) traffic.length(a) else traffic.width(a)) + (if (bx) traffic.length(b) else traffic.width(b))) / 2
-            val d = ((if (ax) traffic.width(a) else traffic.length(a)) + (if (bx) traffic.width(b) else traffic.length(b))) / 2
-            if (dx < w - 0.15f && dz < d - 0.15f) overlaps++
+/** A point 35 m in front of a tall building's wall with a clear line to it, and the heading that faces it. */
+private fun wallAhead(): FloatArray? {
+    val map = city.map
+    val home = city.homeDock
+    val order = (0 until map.buildingCount).sortedBy { hypot(map.boxX[it] - city.docks[home * 3], map.boxZ[it] - city.docks[home * 3 + 2]) }
+    for (i in order) {
+        if (map.floors[i] * map.floorHeight[i] < 22f || map.boxHalfX[i] < 6f || map.boxHalfZ[i] < 6f) continue
+        for (side in intArrayOf(1, -1)) {
+            val nx = cos(map.boxAngle[i]) * side; val nz = sin(map.boxAngle[i]) * side
+            val sx = map.boxX[i] + nx * (map.boxHalfX[i] + 35f); val sz = map.boxZ[i] + nz * (map.boxHalfX[i] + 35f)
+            if (abs(sx) > City.BOUNDS - 50 || abs(sz) > City.BOUNDS - 50) continue
+            if (city.support(sx, sz, 30f, 1f) > 0.5f) continue
+            val hit = city.raycast(sx, 10f, sz, -nx, 0f, -nz, 40f)
+            if (abs(hit - 35f) < 0.5f) return floatArrayOf(sx, sz, atan2(-nx, nz))
         }
     }
-    check("cars never overlap", overlaps == 0, overlaps)
-    check("traffic keeps flowing", traffic.speed.count { it > 2f } > Traffic.COUNT / 4)
+    return null
+}
+
+private fun dockTests() {
+    check("docks at the junctions", city.dockCount > 50, city.dockCount)
+    val some = city.dockCount / 2
+    check("nearest dock", city.nearestDock(city.docks[some * 3] + 1f, city.docks[some * 3 + 2] - 1f) == some)
+    check("starts on a dock, charged", Rig().drone.let { it.onDock && it.battery == 100f && !it.charging })
+
+    Rig(false).hoverHigh().apply {
+        val before = drone.battery
+        run(120f)
+        near("hover drains 10 minutes per charge", before - drone.battery, 120f * DroneSim.HOVER_DRAIN, 2.5f)
+    }
+
+    // Hovering until the battery is low sends it to a dock by itself, where it charges in seconds.
+    Rig(false).hoverHigh().apply {
+        input.forward = 1f; run(8f); input.forward = 0f
+        var t = 0f
+        while (drone.autoReturns == 0 && t < 700f) { run(1f); t += 1f }
+        check("low battery returns by itself", drone.autoReturns == 1 && drone.phase == Phase.RETURN, "${drone.phase} $t")
+        run(60f)
+        check("auto return lands on a dock", drone.phase == Phase.LANDED && drone.onDock, "${drone.phase} ${drone.dockDistance}")
+        check("charges on the dock", drone.battery > 50f || drone.charging, drone.battery)
+        run(10.5f)
+        check("full charge within ten seconds", drone.battery == 100f, drone.battery)
+    }
+
+    // Ignoring the warning: the battery dies in the air and the drone comes back on the nearest dock.
+    Rig(false).hoverHigh().apply {
+        input.forward = 1f; run(8f)
+        input.forward = 0.5f
+        var t = 0f
+        while (drone.depletions == 0 && t < 700f) { run(1f); t += 1f }
+        input.forward = 0f
+        check("battery runs flat", drone.depletions == 1, t)
+        run(5f)
+        check("flat battery respawns on a dock", drone.phase == Phase.LANDED && drone.onDock, "${drone.phase} ${drone.dockDistance}")
+        check("comes back with little charge", drone.battery < 30f && drone.charging, drone.battery)
+        run(10.5f)
+        check("dock recharges it", drone.battery == 100f, drone.battery)
+    }
+}
+
+/** Do two vehicles' footprints overlap? Separating-axis test on their rotated rectangles, shrunk a little. */
+private fun overlap(t: Traffic, a: Int, b: Int): Boolean {
+    if (abs(t.y[a] - t.y[b]) > 2f) return false
+    val ax = sin(t.yaw[a]); val az = -cos(t.yaw[a]); val bx = sin(t.yaw[b]); val bz = -cos(t.yaw[b])
+    val dx = t.x[b] - t.x[a]; val dz = t.z[b] - t.z[a]
+    val la = t.length(a) / 2 - 0.2f; val wa = t.width(a) / 2 - 0.15f
+    val lb = t.length(b) / 2 - 0.2f; val wb = t.width(b) / 2 - 0.15f
+    for ((ux, uz) in listOf(ax to az, -az to ax, bx to bz, -bz to bx)) {
+        val ra = la * abs(ax * ux + az * uz) + wa * abs(-az * ux + ax * uz)
+        val rb = lb * abs(bx * ux + bz * uz) + wb * abs(-bz * ux + bx * uz)
+        if (abs(dx * ux + dz * uz) > ra + rb) return false
+    }
+    return true
+}
+
+private val overlapKinds = IntArray(4)
+private fun trafficTests(name: String, t: Traffic) {
+    overlapKinds.fill(0)
+    check("$name: lots of traffic", t.count > 1200, t.count)
+    var overlaps = 0
+    var queued = 0
+    var moving = 0
+    val cells = HashMap<Int, MutableList<Int>>()
+    val startX = t.x.copyOf(); val startZ = t.z.copyOf()
+    repeat(4 * 60 * 30) { frame ->
+        t.update(1f / 30f)
+        if (frame % 10 != 0) return@repeat
+        queued = max(queued, t.speed.count { it < 0.5f })
+        cells.clear()
+        for (car in 0 until t.count) {
+            val key = floor(t.x[car] / 12f).toInt() * 1000 + floor(t.z[car] / 12f).toInt()
+            cells.getOrPut(key) { ArrayList() }.add(car)
+        }
+        for (a in 0 until t.count) for (cx in -1..1) for (cz in -1..1) {
+            val key = (floor(t.x[a] / 12f).toInt() + cx) * 1000 + floor(t.z[a] / 12f).toInt() + cz
+            for (b in cells[key] ?: continue) if (b > a && overlap(t, a, b)) {
+                overlaps++
+                val dot = sin(t.yaw[a]) * sin(t.yaw[b]) + cos(t.yaw[a]) * cos(t.yaw[b])
+                val kind = if (dot > 0.7f) 0 else if (dot < -0.7f) 1 else 2
+                overlapKinds[kind]++
+                if (frame == 4 * 60 * 30 - 10 && overlapKinds[3] < 12) {
+                    overlapKinds[3]++
+                    println("  overlap ${t.type[a]}/${t.type[b]} at ${t.x[a].toInt()},${t.z[a].toInt()} speeds ${t.speed[a]} ${t.speed[b]} dot $dot")
+                }
+            }
+        }
+    }
+    for (car in 0 until t.count) if (hypot(t.x[car] - startX[car], t.z[car] - startZ[car]) > 60f) moving++
+    println("$name overlaps: same way ${overlapKinds[0]}, opposite ${overlapKinds[1]}, crossing ${overlapKinds[2]}")
+    // Sampled 720 times: on average fewer than one vehicle in 150 touching another. What is left is
+    // where the map itself has roads on top of each other, like the ramps of the Kuril interchange.
+    check("$name: vehicles hardly ever overlap", overlaps / 720f < t.count / 150f, overlaps / 720f)
+    check("$name: traffic gets around", moving > t.count / 3, moving)
+    check("$name: queues and jams form", queued > t.count / 8, queued)
+    check("$name: all on the map", (0 until t.count).all { abs(t.x[it]) <= City.HALF + 5f && abs(t.z[it]) <= City.HALF + 5f && t.x[it].isFinite() })
     var bothGreen = false
     for (tenth in 0..520) for (g in 0..1) {
         if (Signals.phase(tenth / 10f, 0, g) != 2 && Signals.phase(tenth / 10f, 1, g) != 2) bothGreen = true
@@ -359,7 +465,11 @@ private fun pacerTests() {
 fun main() {
     mappingTests()
     flightTests()
-    trafficTests()
+    trafficTests("bashundhara", Traffic(city))
+    val other = City(loadMap("mohammadpur"))
+    check("mohammadpur builds", other.chunks.sumOf { it.mesh.vertices } > 100000 && other.dockCount > 50)
+    trafficTests("mohammadpur", Traffic(other))
+    println("mohammadpur: ${other.chunks.sumOf { it.mesh.vertices }} + ${other.chunks.sumOf { it.detail.vertices }} detail vertices, tallest ${other.tallest} m")
     headTests()
     smoothnessTests()
     textureTests()

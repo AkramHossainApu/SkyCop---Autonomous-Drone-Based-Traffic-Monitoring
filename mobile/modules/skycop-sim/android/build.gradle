@@ -13,3 +13,16 @@ android {
     versionName '1.0.0'
   }
 }
+
+dependencies {
+  // The live camera's frames come from react-native-webrtc's tracks (see LiveFeed.kt).
+  implementation project(':react-native-webrtc')
+  implementation 'com.facebook.react:react-android'
+}
+
+android {
+  // The Dhaka maps built by maps/build_maps.py.
+  sourceSets {
+    main.assets.srcDirs += '../assets'
+  }
+}

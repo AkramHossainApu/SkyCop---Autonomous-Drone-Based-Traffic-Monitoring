@@ -42,6 +42,7 @@ internal class Program(vertexSource: String, fragmentSource: String) {
 internal class GpuMesh(builder: MeshBuilder, private val maxInstances: Int = 0) {
     private val count = builder.vertices
     private val vao: Int
+    private val vertexBuffer: Int
     private val instanceBuffer: Int
     private val instances: FloatBuffer? = if (maxInstances > 0) directFloats(maxInstances * 8) else null
     private var instanceCount = 0
@@ -52,6 +53,7 @@ internal class GpuMesh(builder: MeshBuilder, private val maxInstances: Int = 0) 
         vao = ids[0]
         glBindVertexArray(vao)
         glGenBuffers(1, ids, 0)
+        vertexBuffer = ids[0]
         glBindBuffer(GL_ARRAY_BUFFER, ids[0])
         val bytes = ByteBuffer.allocateDirect(count * 20).order(ByteOrder.nativeOrder())
         bytes.asIntBuffer().put(builder.data, 0, count * 5)
@@ -71,6 +73,13 @@ internal class GpuMesh(builder: MeshBuilder, private val maxInstances: Int = 0) 
             instanceBuffer = 0
         }
         glBindVertexArray(0)
+    }
+
+    /** Frees the GPU buffers; the mesh must not be drawn again. */
+    fun release() {
+        glDeleteBuffers(1, intArrayOf(vertexBuffer), 0)
+        if (instanceBuffer != 0) glDeleteBuffers(1, intArrayOf(instanceBuffer), 0)
+        glDeleteVertexArrays(1, intArrayOf(vao), 0)
     }
 
     fun beginInstances() {

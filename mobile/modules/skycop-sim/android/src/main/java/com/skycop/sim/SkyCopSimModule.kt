@@ -28,6 +28,7 @@ class SkyCopSimModule : Module() {
     private val main = Handler(Looper.getMainLooper())
     private var pending: Promise? = null
     private var liveAvailable = false
+    private var startLive = false
     private var linkArrived = false
     private var hookedWindow: WeakReference<Window>? = null
     private var hook: ControllerButtonCallback? = null
@@ -36,7 +37,7 @@ class SkyCopSimModule : Module() {
         Name("SkyCopSim")
         Events(BUTTON_EVENT)
 
-        AsyncFunction("openSimulation") { liveAvailable: Boolean, promise: Promise ->
+        AsyncFunction("openSimulation") { liveAvailable: Boolean, startLive: Boolean, promise: Promise ->
             val activity = appContext.currentActivity
             if (activity == null) {
                 promise.reject(CodedException("ERR_NO_ACTIVITY", "The app is not in the foreground.", null))
@@ -45,11 +46,18 @@ class SkyCopSimModule : Module() {
             } else {
                 pending = promise
                 this@SkyCopSimModule.liveAvailable = liveAvailable
+                this@SkyCopSimModule.startLive = startLive
                 linkArrived = false
                 Textures.prepare()
                 launch(activity)
             }
         }.runOnQueue(Queues.MAIN)
+
+        // The live camera stream to show in VR, by react-native-webrtc stream URL; null when there is none.
+        Function("setLiveStream") { streamUrl: String? ->
+            main.post { LiveFeed.follow(appContext.reactContext as? com.facebook.react.bridge.ReactContext, streamUrl) }
+            Unit
+        }
 
         // Pairing crypto, matching the website's WebCrypto calls byte for byte.
         Function("sha256Hex") { text: String -> PairingCrypto.sha256Hex(text) }
@@ -102,6 +110,9 @@ class SkyCopSimModule : Module() {
     private fun launch(activity: Activity) {
         val intent = Intent(activity, SimulationActivity::class.java)
             .putExtra(SimulationActivity.EXTRA_LIVE_AVAILABLE, liveAvailable)
+            .putExtra(SimulationActivity.EXTRA_START_LIVE, startLive)
+        // Only the first opening starts on the live camera; a relaunch keeps whatever was on screen.
+        startLive = false
         try {
             @Suppress("DEPRECATION")
             activity.startActivityForResult(intent, REQUEST)

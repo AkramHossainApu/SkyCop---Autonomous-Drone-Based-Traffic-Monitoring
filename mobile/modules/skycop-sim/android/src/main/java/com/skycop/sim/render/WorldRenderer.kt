@@ -5,7 +5,7 @@ import com.skycop.sim.core.*
 import kotlin.math.*
 
 /** Draws the city, traffic and drone: one shadow pass, then one color pass per eye. */
-internal class WorldRenderer(private val city: City, gpu: GpuProfile) {
+internal class WorldRenderer(private var city: City, gpu: GpuProfile) {
     private companion object {
         const val SHADOW_HALF = 85f
         const val NEAR = 0.15f
@@ -42,9 +42,9 @@ internal class WorldRenderer(private val city: City, gpu: GpuProfile) {
     private val glowModel = glow.uniform("uModel")
     private val glowColor = glow.uniform("uGlow")
 
-    private val terrain = GpuMesh(city.terrain)
-    private val blocks = Array(city.chunks.size) { GpuMesh(city.chunks[it].mesh) }
-    private val details = Array(city.chunks.size) { GpuMesh(city.chunks[it].detail) }
+    private var terrain = GpuMesh(city.terrain)
+    private var blocks = Array(city.chunks.size) { GpuMesh(city.chunks[it].mesh) }
+    private var details = Array(city.chunks.size) { GpuMesh(city.chunks[it].detail) }
     private val droneBody = GpuMesh(Models.drone())
     private val propeller = GpuMesh(Models.propeller())
     private val rotorDisc = GpuMesh(Models.rotorDisc())
@@ -74,7 +74,7 @@ internal class WorldRenderer(private val city: City, gpu: GpuProfile) {
 
     init {
         val models = Models.vehicles()
-        vehicles = Array(models.size) { GpuMesh(models[it], Traffic.COUNT) }
+        vehicles = Array(models.size) { GpuMesh(models[it], Traffic.MAX_VEHICLES) }
 
         val id = IntArray(1)
         glGenVertexArrays(1, id, 0)
@@ -107,6 +107,17 @@ internal class WorldRenderer(private val city: City, gpu: GpuProfile) {
         lightBasis[8] = bx; lightBasis[9] = by; lightBasis[10] = bz
     }
 
+    /** Swaps in another map's city, freeing the old one's meshes. Shaders and textures stay. */
+    fun load(next: City) {
+        terrain.release()
+        for (mesh in blocks) mesh.release()
+        for (mesh in details) mesh.release()
+        city = next
+        terrain = GpuMesh(next.terrain)
+        blocks = Array(next.chunks.size) { GpuMesh(next.chunks[it].mesh) }
+        details = Array(next.chunks.size) { GpuMesh(next.chunks[it].detail) }
+    }
+
     /** Uploads what moves and renders the shadow map. Called once per frame. */
     fun prepare(game: Game, level: QualityLevel) {
         quality = level
@@ -128,7 +139,7 @@ internal class WorldRenderer(private val city: City, gpu: GpuProfile) {
 
         for (mesh in vehicles) mesh.beginInstances()
         val traffic = game.traffic
-        for (car in 0 until Traffic.COUNT) {
+        for (car in 0 until traffic.count) {
             val x = traffic.x[car]; val z = traffic.z[car]
             val dx = x - eye[0]; val dz = z - eye[2]
             if (abs(dx) > level.carRange || abs(dz) > level.carRange) continue
@@ -136,7 +147,7 @@ internal class WorldRenderer(private val city: City, gpu: GpuProfile) {
             val b = game.camera.basis
             if (abs(dx) + abs(dz) > 70f && -(dx * b[8] + dz * b[10]) < -30f && abs(b[9]) < 0.45f) continue
             val color = traffic.color[car]
-            vehicles[traffic.type[car]].addInstance(x, 0f, z, traffic.yaw[car], color)
+            vehicles[traffic.type[car]].addInstance(x, traffic.y[car], z, traffic.yaw[car], color)
         }
         for (mesh in vehicles) mesh.uploadInstances()
 
@@ -226,7 +237,8 @@ internal class WorldRenderer(private val city: City, gpu: GpuProfile) {
             for (i in blocks.indices) {
                 val chunk = city.chunks[i]
                 val distance = hypot(chunk.x - x, chunk.z - z)
-                if (distance < from || distance >= to || !visible(chunk)) continue
+                // Past this the haze has swallowed everything anyway.
+                if (distance < from || distance >= to || distance - chunk.reach > 950f || !visible(chunk)) continue
                 blocks[i].draw()
                 if (distance < quality.detailRange) details[i].draw()
             }
@@ -265,7 +277,7 @@ internal class WorldRenderer(private val city: City, gpu: GpuProfile) {
     }
 
     private fun visible(chunk: City.Chunk): Boolean {
-        val half = City.PITCH / 2 + 9f
+        val half = chunk.reach + 2f
         for (p in 0..5) {
             val a = planes[p * 4]; val b = planes[p * 4 + 1]; val c = planes[p * 4 + 2]; val d = planes[p * 4 + 3]
             val reach = a * chunk.x + abs(a) * half + max(0f, b * chunk.top) + c * chunk.z + abs(c) * half + d

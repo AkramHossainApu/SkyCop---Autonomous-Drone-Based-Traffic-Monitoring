@@ -72,8 +72,8 @@ internal object Models {
         }
     }
 
-    /** Index order matches Traffic's type ids. */
-    fun vehicles(): Array<MeshBuilder> = arrayOf(sedan(), hatchback(), van(), bus(), police(), rickshaw())
+    /** Index order matches Traffic's type ids: car, CNG, cycle rickshaw, bus, motorbike, microbus. */
+    fun vehicles(): Array<MeshBuilder> = arrayOf(sedan(), cng(), cycleRickshaw(), bus(), motorbike(), van())
 
     private fun MeshBuilder.wheels(x: Float, front: Float, back: Float, radius: Float) {
         for (sideX in floatArrayOf(-x, x)) for (z in floatArrayOf(front, back)) {
@@ -130,21 +130,6 @@ internal object Models {
 
     private fun sedan() = MeshBuilder().apply { saloon() }
 
-    private fun hatchback() = MeshBuilder().apply {
-        hull(
-            floatArrayOf(-1.82f, -1.65f, -0.75f, 1.55f, 1.82f),
-            floatArrayOf(0.72f, 0.85f, 0.88f, 0.87f, 0.76f),
-            floatArrayOf(0.36f, 0.28f, 0.27f, 0.28f, 0.36f),
-            floatArrayOf(0.58f, 0.67f, 0.75f, 0.76f, 0.64f),
-            floatArrayOf(0.72f, 0.84f, 0.96f, 0.96f, 0.82f),
-            TINTED, Mat.TINT,
-        )
-        trim(0.88f, -1.83f, 1.83f, -0.72f, 1.0f)
-        cabin(0.83f, 0.7f, 0.94f, 1.58f, -0.8f, -0.3f, 1.7f, 1.45f, TINTED)
-        wheels(0.78f, -1.15f, 1.2f, 0.33f)
-        lights(0.5f, -1.83f, 1.83f, 0.63f)
-    }
-
     private fun van() = MeshBuilder().apply {
         hull(
             floatArrayOf(-2.47f, -2.3f, 2.47f),
@@ -161,32 +146,90 @@ internal object Models {
         lights(0.62f, -2.48f, 2.48f, 0.82f)
     }
 
+    /** A Dhaka local bus: painted body with a pale band, open door, roof rack and sliding windows. */
     private fun bus() = MeshBuilder().apply {
-        box(-1.25f, 0.45f, -5f, 1.25f, 3.1f, 5f, TINTED, Mat.TINT)
+        box(-1.25f, 0.45f, -5.2f, 1.25f, 3.1f, 5.2f, TINTED, Mat.TINT)
+        box(-1.27f, 1.32f, -5.21f, 1.27f, 1.52f, 5.21f, 0xF2EEE2)
         for (x in floatArrayOf(-1.26f, 1.26f)) {
-            for (k in 0..5) centered(x, 2.15f, -3.7f + k * 1.48f, 0.03f, 1f, 1.25f, WINDOW, Mat.GLASS)
+            for (k in 0..6) centered(x, 2.2f, -4.1f + k * 1.3f, 0.03f, 0.95f, 1.1f, WINDOW, Mat.GLASS)
         }
-        centered(0f, 2.05f, -5.015f, 2.2f, 1.4f, 0.03f, WINDOW, Mat.GLASS)
-        centered(0f, 2.3f, 5.015f, 1.9f, 0.8f, 0.03f, WINDOW, Mat.GLASS)
-        wheels(1.15f, -3.2f, 3.3f, 0.48f)
-        lights(0.9f, -5.02f, 5.02f, 0.85f)
+        centered(1.265f, 1.55f, -3.9f, 0.03f, 2.1f, 0.9f, 0x15191C)
+        centered(0f, 2.15f, -5.215f, 2.25f, 1.25f, 0.03f, WINDOW, Mat.GLASS)
+        centered(0f, 2.95f, -5.22f, 1.5f, 0.24f, 0.03f, 0x101214)
+        centered(0f, 2.95f, -5.235f, 1.3f, 0.12f, 0.02f, 0xF0C030, Mat.EMISSIVE)
+        centered(0f, 2.3f, 5.215f, 1.9f, 0.8f, 0.03f, WINDOW, Mat.GLASS)
+        for (k in -2..2) centered(0f, 3.17f, k * 1.6f, 2.1f, 0.06f, 0.06f, 0x3A3D40)
+        wheels(1.15f, -3.4f, 3.5f, 0.5f)
+        lights(0.9f, -5.22f, 5.22f, 0.85f)
     }
 
-    private fun police() = MeshBuilder().apply {
-        saloon()
-        box(-0.955f, 0.5f, -0.9f, -0.93f, 0.74f, 1.3f, BLUE, Mat.GLOSSY)
-        box(0.93f, 0.5f, -0.9f, 0.955f, 0.74f, 1.3f, BLUE, Mat.GLOSSY)
-        box(-0.6f, 1.5f, 0.1f, -0.02f, 1.66f, 0.4f, 0xFF2020, Mat.STROBE)
-        box(0.02f, 1.5f, 0.1f, 0.6f, 1.66f, 0.4f, 0x205CFF, Mat.STROBE)
+    /** A rider or a rickshaw puller: shirt, trousers, head, and a helmet for the bikers. */
+    private fun MeshBuilder.person(x: Float, seat: Float, z: Float, shirt: Int, helmet: Boolean) {
+        centered(x, seat + 0.32f, z, 0.36f, 0.6f, 0.24f, shirt)
+        centered(x - 0.1f, seat - 0.05f, z - 0.2f, 0.13f, 0.18f, 0.42f, 0x2B2F3A)
+        centered(x + 0.1f, seat - 0.05f, z - 0.2f, 0.13f, 0.18f, 0.42f, 0x2B2F3A)
+        ellipsoid(x, seat + 0.78f, z, 0.11f, 0.13f, 0.12f, 6, 4, if (helmet) 0x1C1E22 else 0x8C5A3C)
+        centered(x - 0.22f, seat + 0.42f, z - 0.25f, 0.08f, 0.08f, 0.5f, shirt)
+        centered(x + 0.22f, seat + 0.42f, z - 0.25f, 0.08f, 0.08f, 0.5f, shirt)
     }
 
-    private fun rickshaw() = MeshBuilder().apply {
-        box(-0.45f, 0.3f, -0.5f, 0.45f, 0.8f, 1.05f, 0x2F7A4B, Mat.GLOSSY)
-        box(-0.25f, 0.4f, -1.05f, 0.25f, 0.85f, -0.5f, TINTED, Mat.TINT)
-        cabin(0.43f, 0.4f, 0.8f, 1.45f, -0.6f, -0.4f, 1.0f, 0.95f, TINTED)
-        axle(-0.08f, 0.08f, 0.25f, -0.8f, 0.25f, 8, TIRE, 0x8E969B)
-        axle(-0.48f, -0.32f, 0.25f, 0.7f, 0.25f, 8, TIRE, 0x8E969B)
-        axle(0.32f, 0.48f, 0.25f, 0.7f, 0.25f, 8, TIRE, 0x8E969B)
-        centered(0f, 0.75f, -1.065f, 0.18f, 0.14f, 0.03f, 0xFFF6CF, Mat.EMISSIVE)
+    /** A CNG auto-rickshaw: green three-wheeler with a canopy and caged doors. */
+    private fun cng() = MeshBuilder().apply {
+        box(-0.64f, 0.28f, -0.55f, 0.64f, 0.82f, 1.25f, TINTED, Mat.TINT)
+        box(-0.42f, 0.28f, -1.35f, 0.42f, 1.05f, -0.55f, TINTED, Mat.TINT)
+        quad(-0.4f, 1.05f, -1.3f, 0.4f, 1.05f, -1.3f, 0.6f, 1.62f, -0.95f, -0.6f, 1.62f, -0.95f, WINDOW, Mat.GLASS)
+        box(-0.68f, 1.62f, -1.0f, 0.68f, 1.74f, 1.3f, TINTED, Mat.TINT)
+        for (x in floatArrayOf(-0.64f, 0.64f)) for (z in floatArrayOf(-0.95f, -0.2f, 0.55f, 1.25f)) {
+            centered(x, 1.22f, z, 0.05f, 0.8f, 0.05f, 0x2C3034)
+        }
+        // The steel grille doors either side of the passengers.
+        for (x in floatArrayOf(-0.645f, 0.645f)) {
+            for (k in 0..6) centered(x, 1.22f, -0.15f + k * 0.2f, 0.02f, 0.78f, 0.025f, 0x3E4246)
+            for (k in 0..2) centered(x, 0.95f + k * 0.27f, 0.45f, 0.02f, 0.025f, 1.3f, 0x3E4246)
+        }
+        box(-0.62f, 0.82f, 0.85f, 0.62f, 1.62f, 1.27f, 0x1E2124)
+        person(0f, 0.85f, -0.35f, 0xE8E2D2, false)
+        axle(-0.07f, 0.07f, 0.22f, -1.05f, 0.22f, 8, TIRE, 0x8E969B)
+        axle(-0.7f, -0.56f, 0.22f, 0.85f, 0.22f, 8, TIRE, 0x8E969B)
+        axle(0.56f, 0.7f, 0.22f, 0.85f, 0.22f, 8, TIRE, 0x8E969B)
+        centered(0f, 0.85f, -1.365f, 0.2f, 0.14f, 0.03f, 0xFFF6CF, Mat.EMISSIVE)
+        centered(-0.45f, 0.6f, 1.26f, 0.12f, 0.1f, 0.03f, 0xC9201C, Mat.EMISSIVE)
+        centered(0.45f, 0.6f, 1.26f, 0.12f, 0.1f, 0.03f, 0xC9201C, Mat.EMISSIVE)
     }
+
+    /** A cycle rickshaw: painted hood, cushioned seat, decorated back panel and its puller. */
+    private fun cycleRickshaw() = MeshBuilder().apply {
+        centered(0f, 0.5f, -0.25f, 0.06f, 0.06f, 1.4f, 0x2C3034)
+        centered(0f, 0.85f, -0.75f, 0.06f, 0.5f, 0.06f, 0x2C3034)
+        centered(0f, 1.05f, -0.82f, 0.5f, 0.04f, 0.04f, 0x2C3034)
+        box(-0.5f, 0.55f, 0.25f, 0.5f, 0.68f, 0.95f, 0x5A3A22)
+        box(-0.5f, 0.68f, 0.3f, 0.5f, 0.86f, 0.85f, 0xC0303A)
+        box(-0.5f, 0.86f, 0.8f, 0.5f, 1.35f, 0.92f, TINTED, Mat.TINT)
+        centered(0f, 0.72f, 0.96f, 0.8f, 0.3f, 0.02f, 0xF0C030)
+        // The folding hood, in bands of colour.
+        for (k in 0..3) {
+            val z0 = 0.95f - k * 0.18f; val z1 = z0 - 0.18f
+            val y0 = 1.35f + k * 0.12f; val y1 = y0 + 0.12f
+            quad(-0.52f, y0, z0, 0.52f, y0, z0, 0.52f, y1, z1, -0.52f, y1, z1, if (k % 2 == 0) TINTED else 0xF2EEE2, if (k % 2 == 0) Mat.TINT else Mat.PLAIN)
+            quad(0.52f, y0, z0, -0.52f, y0, z0, -0.52f, y1, z1, 0.52f, y1, z1, 0x1E2124)
+        }
+        person(0f, 0.95f, -0.45f, 0xD9D2C2, false)
+        axle(-0.05f, 0.05f, 0.33f, -0.95f, 0.33f, 10, TIRE, 0xA0A6AA)
+        axle(-0.58f, -0.5f, 0.33f, 0.6f, 0.33f, 10, TIRE, 0xA0A6AA)
+        axle(0.5f, 0.58f, 0.33f, 0.6f, 0.33f, 10, TIRE, 0xA0A6AA)
+    }
+
+    /** A motorbike with its rider. */
+    private fun motorbike() = MeshBuilder().apply {
+        axle(-0.06f, 0.06f, 0.31f, -0.7f, 0.31f, 10, TIRE, 0x9AA0A4)
+        axle(-0.07f, 0.07f, 0.31f, 0.68f, 0.31f, 10, TIRE, 0x9AA0A4)
+        box(-0.16f, 0.4f, -0.45f, 0.16f, 0.7f, 0.5f, 0x2C3034)
+        box(-0.18f, 0.7f, -0.45f, 0.18f, 0.92f, -0.05f, TINTED, Mat.TINT)
+        box(-0.15f, 0.72f, -0.05f, 0.15f, 0.84f, 0.6f, 0x15181A)
+        centered(0f, 0.95f, -0.62f, 0.62f, 0.04f, 0.04f, 0x2C3034)
+        centered(0f, 0.8f, -0.82f, 0.16f, 0.14f, 0.05f, 0xFFF6CF, Mat.EMISSIVE)
+        centered(0f, 0.72f, 0.72f, 0.12f, 0.08f, 0.04f, 0xC9201C, Mat.EMISSIVE)
+        person(0f, 0.84f, 0.15f, 0x3A5C8C, true)
+    }
+
 }

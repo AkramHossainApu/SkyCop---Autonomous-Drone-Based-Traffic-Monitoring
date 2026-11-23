@@ -7,7 +7,7 @@ final class SimRenderer: NSObject, MTKViewDelegate {
   private static let EYE_OFFSET: Float = 0.032, LENS_A: Float = 0.16, LENS_B: Float = 0.04, MAX_RENDER_HEIGHT = 1080
   private static let log = Logger(subsystem: "com.skycop.sim", category: "SkyCopSim")
 
-  let game: Game
+  private(set) var game: Game
   private let settings: Settings
   private let gamepad: GamepadInput
   private let head: HeadTracker
@@ -16,6 +16,8 @@ final class SimRenderer: NSObject, MTKViewDelegate {
   private let device: MTLDevice
   private let queue: MTLCommandQueue
   private let world: WorldRenderer
+  private let live: LiveScreen
+  private var startLive: Bool
   private let hud = Hud()
   private let hudPipeline: MTLRenderPipelineState
   private let presentPipeline: MTLRenderPipelineState
@@ -41,7 +43,7 @@ final class SimRenderer: NSObject, MTKViewDelegate {
   var debug = UserDefaults.standard.bool(forKey: "SkyCopDebug")
   private var screenWidth = 1, screenHeight = 1
 
-  init(view: MTKView, game: Game, gamepad: GamepadInput, head: HeadTracker, audio: RotorAudio) throws {
+  init(view: MTKView, game: Game, gamepad: GamepadInput, head: HeadTracker, audio: RotorAudio, startLive: Bool) throws {
     guard let device = view.device, let queue = device.makeCommandQueue() else { throw NSError(domain: "SkyCop", code: 1) }
     self.device = device
     self.queue = queue
@@ -52,6 +54,8 @@ final class SimRenderer: NSObject, MTKViewDelegate {
     self.audio = audio
     let library = try device.makeLibrary(source: MetalShaders.source, options: nil)
     world = try WorldRenderer(device: device, library: library, city: game.city, colorFormat: .bgra8Unorm, samples: 4)
+    live = try LiveScreen(device: device, colorFormat: .bgra8Unorm, samples: 4)
+    self.startLive = startLive
 
     let hudVertex = MTLVertexDescriptor()
     hudVertex.attributes[0].format = .float2; hudVertex.attributes[0].offset = 0; hudVertex.attributes[0].bufferIndex = 0
@@ -123,6 +127,13 @@ final class SimRenderer: NSObject, MTKViewDelegate {
 
   func resume() { resumed = true }
 
+  /// A new flight on another map: the city's meshes are swapped, shaders and textures stay.
+  func replace(_ next: Game) {
+    game = next
+    world.load(next.city)
+    resumed = true
+  }
+
   /// Vertical drag in points while a menu is open.
   func drag(_ points: Float, _ height: Float) {
     let rows = Int(points / height * 540 / 34)
@@ -173,12 +184,17 @@ final class SimRenderer: NSObject, MTKViewDelegate {
     let pressed = gamepad.takePresses() | touchPresses
     touchPresses = 0
 
+    game.liveAvailable = LiveFeed.shared.available
+    if startLive {
+      startLive = false
+      game.watchLive()
+    }
     head.orientation = view.window?.windowScene?.interfaceOrientation ?? .landscapeRight
     let tracked = settings.headTracking && settings.vr && head.available
     head.read(&headPose, tracked)
     game.update(dt, pad, pressed, gamepad.mapping, gamepad.raw, headPose, tracked)
     game.headSensorMissing = settings.headTracking && settings.vr && !head.available
-    audio.set(game.drone.render.rotor, settings.sound && game.screen == .flight)
+    audio.set(game.drone.render.rotor, settings.sound && game.screen == .flight && !game.watchingLive)
 
     render(view, dt)
     if measured && debug { report() }
@@ -198,7 +214,13 @@ final class SimRenderer: NSObject, MTKViewDelegate {
     let aspect = Float(screenWidth) / Float(eyes) / Float(screenHeight)
     let tanHalf = settings.vr ? tan(43 * DEG) : tan(31 * DEG)
 
-    world.prepare(game, QUALITY_LEVELS[governor.level], frameIndex, commands)
+    let watching = game.watchingLive
+    if watching {
+      live.upload()
+      game.liveHasVideo = live.hasVideo
+    } else {
+      world.prepare(game, QUALITY_LEVELS[governor.level], frameIndex, commands)
+    }
     hud.build(game, pad, aspect, governor.fps, touch)
     let hudBuffer = hudBuffers[frameIndex]
     _ = hud.batch.data.withUnsafeBytes { memcpy(hudBuffer.contents(), $0.baseAddress!, hud.batch.count * 32) }
@@ -208,18 +230,22 @@ final class SimRenderer: NSObject, MTKViewDelegate {
     scene.colorAttachments[0].resolveTexture = sceneColor
     scene.colorAttachments[0].loadAction = .clear
     scene.colorAttachments[0].storeAction = .multisampleResolve
-    scene.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+    scene.colorAttachments[0].clearColor = watching ? LiveScreen.ROOM : MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
     scene.depthAttachment.texture = msaaDepth
     scene.depthAttachment.loadAction = .clear
     scene.depthAttachment.storeAction = .dontCare
     scene.depthAttachment.clearDepth = 1
     if let encoder = commands.makeRenderCommandEncoder(descriptor: scene) {
-      let basis = game.camera.basis, eye = game.camera.eye
+      let basis = watching ? game.liveBasis : game.camera.basis, eye = game.camera.eye
       for i in 0..<eyes {
         encoder.setViewport(MTLViewport(originX: Double(i * eyeWidth), originY: 0, width: Double(eyeWidth), height: Double(usedHeight), znear: 0, zfar: 1))
         encoder.setScissorRect(MTLScissorRect(x: i * eyeWidth, y: 0, width: eyeWidth, height: usedHeight))
         let offset: Float = eyes == 1 ? 0 : Float(i * 2 - 1) * SimRenderer.EYE_OFFSET
-        world.drawEye(encoder, basis, eye[0] + basis[0] * offset, eye[1] + basis[1] * offset, eye[2] + basis[2] * offset, tanHalf, aspect)
+        if watching {
+          live.drawEye(encoder, basis, basis[0] * offset, basis[1] * offset, basis[2] * offset, tanHalf, aspect, settings.vr)
+        } else {
+          world.drawEye(encoder, basis, eye[0] + basis[0] * offset, eye[1] + basis[1] * offset, eye[2] + basis[2] * offset, tanHalf, aspect)
+        }
       }
       encoder.endEncoding()
     }
@@ -273,8 +299,7 @@ final class SimRenderer: NSObject, MTKViewDelegate {
 
   /// A tap in the headset opens the menu; in the menu it picks the row under the finger.
   func tap(_ px: Float, _ py: Float, _ width: Float, _ height: Float) -> Int {
-    if game.screen == .flight { return settings.vr ? Button.START : 0 }
-    if game.screen != .menu { game.back(); return 0 }
+    if game.screen != .flight && game.screen != .menu { game.back(); return 0 }
     let eyes = settings.vr ? 2 : 1
     let eyeWidth = width / Float(eyes)
     let eye = Int(px / eyeWidth).clamped(0, eyes - 1)
@@ -287,7 +312,9 @@ final class SimRenderer: NSObject, MTKViewDelegate {
       let k = (1 + SimRenderer.LENS_A * r2 + SimRenderer.LENS_B * r2 * r2) / (1 + SimRenderer.LENS_A + SimRenderer.LENS_B)
       x *= k; y *= k
     }
-    let row = hud.menuRowAt(x * Hud.HALF_HEIGHT * aspect / hud.scale, y * Hud.HALF_HEIGHT / hud.scale)
+    let hudX = x * Hud.HALF_HEIGHT * aspect / hud.scale, hudY = y * Hud.HALF_HEIGHT / hud.scale
+    if game.screen == .flight { return settings.vr || game.watchingLive ? Button.START : 0 }
+    let row = hud.menuRowAt(hudX, hudY)
     if row >= 0 { game.activate(row) }
     return 0
   }

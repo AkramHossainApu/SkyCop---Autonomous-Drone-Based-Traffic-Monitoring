@@ -8,6 +8,8 @@ interface GameHost {
     fun calibrationCleared()
     fun recenterHead()
     fun rumble(strength: Float)
+    /** The pilot picked another map; the platform rebuilds the city and starts a new flight there. */
+    fun mapChanged()
 }
 
 private object DetachedHost : GameHost {
@@ -17,10 +19,13 @@ private object DetachedHost : GameHost {
     override fun calibrationCleared() = Unit
     override fun recenterHead() = Unit
     override fun rumble(strength: Float) = Unit
+    override fun mapChanged() = Unit
 }
 
 enum class MenuItem(val label: String) {
     RESUME("RESUME FLIGHT"),
+    EXIT("EXIT SIMULATION"),
+    MAP("MAP"),
     LAYOUT("CONTROL LAYOUT"),
     CONTROLS("SHOW CONTROLS"),
     CALIBRATE("CALIBRATE CONTROLLER"),
@@ -38,13 +43,12 @@ enum class MenuItem(val label: String) {
     WIND("WIND"),
     SOUND("ROTOR SOUND"),
     RESTART("RESTART FLIGHT"),
-    EXIT("EXIT SIMULATION"),
 }
 
 enum class Screen { FLIGHT, MENU, CONTROLS, CALIBRATION }
 
-class Game(val city: City, val settings: Settings, private var host: GameHost, private var liveAvailable: Boolean) {
-    val traffic = Traffic()
+class Game(val city: City, val settings: Settings, private var host: GameHost, var liveAvailable: Boolean) {
+    val traffic = Traffic(city)
     val drone = DroneSim(city, traffic)
     val camera = CameraRig(city)
     val calibration = Calibration()
@@ -62,12 +66,24 @@ class Game(val city: City, val settings: Settings, private var host: GameHost, p
         private set
     var propellerAngle = 0f
         private set
+    /** Watching the live camera instead of flying; the flight waits, paused, until X or B. */
+    var watchingLive = false
+        private set
+    /** Set by the renderer: a frame of live video has arrived. */
+    var liveHasVideo = false
+    /** Head orientation for the live screen, which is fixed in the room. */
+    val liveBasis = FloatArray(16).also { Mat4.identity(it) }
+    var liveSince = 0f
+        private set
 
     private val input = PilotInput()
     private var toastUntil = 0f
     private var repeatIn = 0f
     private var lastDirection = 0
     private var crashes = 0
+    private var depletions = 0
+    private var autoReturns = 0
+    private var wasCharging = false
 
     private fun show(message: String, seconds: Float = 2.5f) {
         toast = message; toastUntil = clock + seconds
@@ -94,13 +110,18 @@ class Game(val city: City, val settings: Settings, private var host: GameHost, p
         clock += dt
         if (toast != null && clock > toastUntil) toast = null
 
+        if (watchingLive && !liveAvailable) {
+            watchingLive = false
+            show("LIVE CAMERA DISCONNECTED")
+        }
         when (screen) {
-            Screen.FLIGHT -> fly(dt, pad, pressed)
+            Screen.FLIGHT -> if (watchingLive) watch(pressed) else fly(dt, pad, pressed)
             Screen.MENU -> navigate(dt, pad, pressed)
             Screen.CONTROLS -> if (pressed and (Button.A or Button.B or Button.START) != 0) screen = Screen.MENU
             Screen.CALIBRATION -> calibrate(dt, pressed, mapping, raw)
         }
-        if (screen == Screen.FLIGHT) {
+        if (watchingLive) head.copyInto(liveBasis)
+        if (screen == Screen.FLIGHT && !watchingLive) {
             traffic.update(dt)
             propellerAngle = (propellerAngle + drone.render.rotor * 31f * dt) % (2 * PI_F)
         }
@@ -114,14 +135,15 @@ class Game(val city: City, val settings: Settings, private var host: GameHost, p
         }
         if (pressed and Button.B != 0) {
             drone.toggleReturnHome()
-            if (drone.phase == Phase.RETURN) show("RETURNING HOME")
+            if (drone.phase == Phase.RETURN) show("RETURNING TO NEAREST DOCK")
+            else if (drone.phase == Phase.FLYING) show("RETURN CANCELLED", 1.5f)
         }
         if (pressed and Button.Y != 0) {
             camera.next()
             show(camera.view.label)
         }
         if (pressed and Button.X != 0) {
-            if (liveAvailable) host.exit(true) else show("NO LIVE CAMERA CONNECTED")
+            if (liveAvailable) watchLive() else show("NO LIVE CAMERA CONNECTED")
         }
         if (pressed and (Button.R3 or Button.SELECT) != 0) {
             camera.recenter(); host.recenterHead()
@@ -153,7 +175,10 @@ class Game(val city: City, val settings: Settings, private var host: GameHost, p
         drone.yawSensitivity = settings.sensitivity / 100f
         drone.windEnabled = settings.wind
         val before = drone.phase
-        if (pressed and Button.A != 0) drone.toggleTakeoffLanding()
+        if (pressed and Button.A != 0) {
+            if (drone.phase == Phase.LANDED && !drone.canTakeOff) show("BATTERY EMPTY - LET IT CHARGE ON A DOCK")
+            drone.toggleTakeoffLanding()
+        }
         drone.update(dt, input)
         if (drone.impact > 0f) {
             host.rumble((drone.impact / 9f).coerceIn(0.2f, 1f))
@@ -161,11 +186,42 @@ class Game(val city: City, val settings: Settings, private var host: GameHost, p
         }
         if (drone.crashes != crashes) {
             crashes = drone.crashes
-            show("CRASH - RESETTING TO HOME", 3.4f)
+            show("CRASHED - RESPAWNING AT NEAREST DOCK", 3.4f)
         }
+        if (drone.depletions != depletions) {
+            depletions = drone.depletions
+            show("BATTERY DEAD - RESPAWNING AT NEAREST DOCK", 3.6f)
+        }
+        if (drone.autoReturns != autoReturns) {
+            autoReturns = drone.autoReturns
+            show("LOW BATTERY - RETURNING TO NEAREST DOCK", 3f)
+        }
+        val charging = drone.charging
+        if (wasCharging && !charging && drone.onDock) show("FULLY CHARGED", 2f)
+        wasCharging = charging
         if (before == Phase.CRASHED && drone.phase == Phase.LANDED) camera.snap(drone.pose.yaw)
         // People put the headset on and then take off, so this is the direction they call forward.
         if (before == Phase.LANDED && drone.phase == Phase.TAKEOFF) host.recenterHead()
+    }
+
+    fun watchLive() {
+        if (!liveAvailable) return
+        watchingLive = true
+        liveSince = clock
+        screen = Screen.FLIGHT
+        host.recenterHead()
+    }
+
+    private fun watch(pressed: Int) {
+        if (pressed and Button.START != 0) { openMenu(); return }
+        if (pressed and (Button.X or Button.B) != 0) {
+            watchingLive = false
+            show("SIMULATION", 1.2f)
+        }
+        if (pressed and (Button.R3 or Button.SELECT) != 0) {
+            host.recenterHead()
+            show("VIEW RECENTERED", 1.2f)
+        }
     }
 
     private fun navigate(dt: Float, pad: PadState, pressed: Int) {
@@ -212,6 +268,7 @@ class Game(val city: City, val settings: Settings, private var host: GameHost, p
                 show("AUTOMATIC MAPPING RESTORED")
             }
             MenuItem.RESTART -> {
+                watchingLive = false
                 drone.reset(); camera.snap(0f); host.recenterHead()
                 screen = Screen.FLIGHT
             }
@@ -252,6 +309,12 @@ class Game(val city: City, val settings: Settings, private var host: GameHost, p
             MenuItem.SHADOWS -> s.shadows = !s.shadows
             MenuItem.WIND -> s.wind = !s.wind
             MenuItem.SOUND -> s.sound = !s.sound
+            MenuItem.MAP -> {
+                s.map = cycle(s.map, by, 0, MapData.FILES.size - 1)
+                host.settingsChanged()
+                host.mapChanged()
+                return
+            }
             MenuItem.SENSITIVITY -> s.sensitivity = cycle(s.sensitivity, by * 10, 50, 150)
             MenuItem.DEADZONE -> s.deadzone = cycle(s.deadzone, by * 2, 4, 30)
             MenuItem.SPACING -> s.lensSpacing = cycle(s.lensSpacing, by * 2, -10, 10)
@@ -288,3 +351,4 @@ class Game(val city: City, val settings: Settings, private var host: GameHost, p
         if (screen == Screen.FLIGHT && drone.airborne) show("CONTROLLER LOST - HOVERING", 4f)
     }
 }
+

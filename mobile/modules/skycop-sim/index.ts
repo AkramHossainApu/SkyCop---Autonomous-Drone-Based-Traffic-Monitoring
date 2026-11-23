@@ -1,13 +1,15 @@
 import { requireOptionalNativeModule, type NativeModule } from 'expo';
 
-/** `live` means the pilot pressed X to switch to the live camera. */
-export type SimulationResult = 'exit' | 'live' | 'error';
+export type SimulationResult = 'exit' | 'error';
 export type ControllerButton = 'x' | 'b';
 
 type Events = { onControllerButton: (event: { button: ControllerButton }) => void };
 
 declare class SkyCopSimModule extends NativeModule<Events> {
-  openSimulation(liveAvailable: boolean): Promise<SimulationResult>;
+  /** Opens the native VR view: the flight simulation, or the live camera when `startLive` is true. */
+  openSimulation(liveAvailable: boolean, startLive: boolean): Promise<SimulationResult>;
+  /** The live camera stream (react-native-webrtc stream URL) the VR view should show, or null. */
+  setLiveStream(streamUrl: string | null): void;
   watchControllerButtons(): Promise<void>;
   sha256Hex(text: string): string;
   /** AES-256-GCM, returned as base64 of iv + ciphertext + tag. */

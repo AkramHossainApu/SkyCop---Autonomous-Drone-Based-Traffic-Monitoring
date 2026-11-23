@@ -20,6 +20,8 @@ final class MeshBuilder {
   private static func face(_ nx: Float, _ ny: Float, _ nz: Float) -> UInt32 {
     let x = abs(nx), y = abs(ny), z = abs(nz)
     if y >= x && y >= z { return ny >= 0 ? 4 : 5 }
+    // A wall at an angle, like most real building footprints: the texture follows the wall.
+    if y < 0.2 && min(x, z) > 0.03 { return 6 }
     if x >= z { return nx >= 0 ? 0 : 1 }
     return nz >= 0 ? 2 : 3
   }

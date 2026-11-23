@@ -32,6 +32,7 @@ import com.skycop.sim.render.SimRenderer
 class SimulationActivity : Activity(), GameHost {
     companion object {
         const val EXTRA_LIVE_AVAILABLE = "liveAvailable"
+        const val EXTRA_START_LIVE = "startLive"
         const val EXTRA_RESULT = "result"
         private const val SETTINGS_KEY = "settings"
     }
@@ -83,8 +84,9 @@ class SimulationActivity : Activity(), GameHost {
         gamepad = GamepadInput(this, prefs)
         head = HeadTracker(this) { screen.rotation }
         renderer = SimRenderer(
-            settings, this, intent.getBooleanExtra(EXTRA_LIVE_AVAILABLE, false),
+            settings, this, intent.getBooleanExtra(EXTRA_LIVE_AVAILABLE, false), intent.getBooleanExtra(EXTRA_START_LIVE, false),
             gamepad, head, touch, audio, { screen.refreshRate },
+            { index -> com.skycop.sim.core.MapData(assets.open("maps/${com.skycop.sim.core.MapData.FILES[index]}.skymap").use { it.readBytes() }) },
         ) { error ->
             main.post {
                 Toast.makeText(this, "3D graphics failed: ${error.message}", Toast.LENGTH_LONG).show()
@@ -252,5 +254,9 @@ class SimulationActivity : Activity(), GameHost {
 
     override fun rumble(strength: Float) {
         main.post { gamepad.rumble(strength) }
+    }
+
+    override fun mapChanged() {
+        renderer.requestMap()
     }
 }

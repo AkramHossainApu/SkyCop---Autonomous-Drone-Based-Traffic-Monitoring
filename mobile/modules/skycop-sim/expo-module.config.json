@@ -1,9 +1,17 @@
 {
-  "platforms": ["apple", "android"],
+  "platforms": [
+    "apple",
+    "android"
+  ],
   "apple": {
-    "modules": ["SkyCopSimModule"]
+    "modules": [
+      "SkyCopSimModule"
+    ],
+    "podspecPath": "SkyCopSim.podspec"
   },
   "android": {
-    "modules": ["com.skycop.sim.SkyCopSimModule"]
+    "modules": [
+      "com.skycop.sim.SkyCopSimModule"
+    ]
   }
 }
