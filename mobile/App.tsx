@@ -5,6 +5,7 @@ import { setVisibilityAsync } from 'expo-navigation-bar';
 import { useEffect, useRef, useState } from 'react';
 import { Image, Linking, Platform, Pressable, ScrollView, StatusBar as NativeStatusBar, StyleSheet, Text, TextInput, View } from 'react-native';
 import SkyCopSim, { type ControllerButton } from './modules/skycop-sim';
+import QrScanner, { ScanGlyph } from './QrScanner';
 import RemoteVideo from './RemoteVideo';
 import { CODE_PATTERN, formatTyping, normalizeCode } from './pairing';
 import { useCameraLink, type LinkStatus } from './useCameraLink';
@@ -46,6 +47,7 @@ export default function App() {
   const [vr, setVr] = useState(false);
   const [hint, setHint] = useState(true);
   const [notice, setNotice] = useState('');
+  const [scanning, setScanning] = useState(false);
   const simulationOpen = useRef(false);
   const leaveRect = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
   const hintShownAt = useRef(0);
@@ -194,7 +196,7 @@ export default function App() {
       ? `Waiting for the camera station with code ${link.code}. Start its camera if it is off.`
       : link.status === 'connecting'
         ? 'Found the camera. Setting up the video.'
-        : 'Type the code from the SkyCop website, or scan its QR code with this phone.';
+        : 'Type the code from the SkyCop website, or tap the scan button and point it at the QR code.';
 
   return (
     <View style={styles.root}>
@@ -238,19 +240,29 @@ export default function App() {
         <View style={[styles.panel, styles.panelPad]}>
           <Text style={styles.h2} accessibilityRole="header">Connect to a camera</Text>
           <Text style={styles.label}>Pairing code</Text>
-          <TextInput
-            accessibilityLabel="Pairing code"
-            value={typed}
-            onChangeText={(value) => setTyped(value.includes('/') || value.includes('=') ? normalizeCode(value) : formatTyping(value))}
-            onSubmitEditing={() => join(typed)}
-            editable={link.status === 'idle' || link.status === 'error'}
-            autoCapitalize="none"
-            autoCorrect={false}
-            placeholder="abc-def-ghj"
-            placeholderTextColor={color.faint}
-            returnKeyType="go"
-            style={styles.codeInput}
-          />
+          <View style={styles.codeRow}>
+            <TextInput
+              accessibilityLabel="Pairing code"
+              value={typed}
+              onChangeText={(value) => setTyped(value.includes('/') || value.includes('=') ? normalizeCode(value) : formatTyping(value))}
+              onSubmitEditing={() => join(typed)}
+              editable={link.status === 'idle' || link.status === 'error'}
+              autoCapitalize="none"
+              autoCorrect={false}
+              placeholder="abc-def-ghj"
+              placeholderTextColor={color.faint}
+              returnKeyType="go"
+              style={styles.codeInput}
+            />
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Scan the QR code"
+              onPress={() => { setNotice(''); setScanning(true); }}
+              style={({ pressed }) => [styles.scanButton, pressed && styles.pressed]}
+            >
+              <ScanGlyph />
+            </Pressable>
+          </View>
           {link.status === 'idle' || link.status === 'error' ? (
             <Pressable
               accessibilityRole="button"
@@ -279,8 +291,16 @@ export default function App() {
           </Pressable>
         </View>
 
-        <Text style={styles.footer}>Video goes straight from the camera to this phone. It never uses this phone's camera.</Text>
+        <Text style={styles.footer}>Video goes straight from the camera to this phone. This phone's camera is used only to scan the pairing QR code.</Text>
       </ScrollView>
+      <QrScanner
+        visible={scanning}
+        onClose={() => setScanning(false)}
+        onCode={(code) => {
+          setScanning(false);
+          join(code);
+        }}
+      />
     </View>
   );
 }
@@ -315,7 +335,10 @@ const styles = StyleSheet.create({
   panelFoot: { padding: 16 },
   h2: { color: color.text, fontSize: 16, lineHeight: 24, fontWeight: '600' },
   label: { color: color.faint, fontSize: 12, marginTop: 16, marginBottom: 6 },
+  codeRow: { flexDirection: 'row', gap: 8 },
+  scanButton: { width: 56, height: 56, borderRadius: 6, backgroundColor: color.raised, alignItems: 'center', justifyContent: 'center' },
   codeInput: {
+    flex: 1,
     height: 56,
     paddingHorizontal: 16,
     borderRadius: 6,

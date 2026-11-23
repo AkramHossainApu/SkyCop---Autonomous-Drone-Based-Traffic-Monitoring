@@ -29,6 +29,17 @@ export function normalizeCode(value: string): string {
   return `${letters.slice(0, 3)}-${letters.slice(3, 6)}-${letters.slice(6)}`;
 }
 
+/**
+ * Returns the pairing code from a SkyCop QR code, or null for any other QR code. The website's QR
+ * holds exactly `<site address>?join=<code>`; the app link `skycop://join?code=<code>` is accepted too.
+ */
+export function codeFromSkyCopQr(data: string): string | null {
+  const text = data.trim();
+  const match = /^https?:\/\/[^\s?#]+\?join=([a-z0-9-]{11})$/i.exec(text) ?? /^skycop:\/\/join\?code=([a-z0-9-]{11})$/i.exec(text);
+  const code = match?.[1].toLowerCase();
+  return code && CODE_PATTERN.test(code) ? code : null;
+}
+
 /** Inserts the dashes while someone types. */
 export function formatTyping(value: string): string {
   const letters = value.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 9);
