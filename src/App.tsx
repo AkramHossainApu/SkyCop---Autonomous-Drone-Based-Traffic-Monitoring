@@ -71,7 +71,7 @@ function JoinPage({ code }: { code: string }) {
       <p className="join-lead">This phone will connect to the camera station with code</p>
       <p className="join-code num">{code}</p>
       <a className="button button-primary join-open" href={href}><Smartphone size={18} aria-hidden /> Open in the SkyCop app</a>
-      <p className="join-note">Nothing happens? Open SkyCop yourself and type the code. Both devices need to be on the same Wi-Fi.</p>
+      <p className="join-note">Nothing happens? Open SkyCop yourself and type the code. Any network works: Wi-Fi or mobile data.</p>
     </main>
   );
 }
@@ -256,7 +256,7 @@ function Station() {
                   </div>
                 </div>
               </div>
-              <p className="pair-help">Scan with the phone's camera, or open SkyCop and type the code. Then tap <strong>Watch in VR</strong>. Both devices need the same Wi-Fi.</p>
+              <p className="pair-help">Scan with the phone's camera, or open SkyCop and type the code. Then tap <strong>Watch in VR</strong>. Any network works; on the same Wi-Fi the picture is sharpest.</p>
             </section>
 
             <section className="panel log" aria-labelledby="log-title">

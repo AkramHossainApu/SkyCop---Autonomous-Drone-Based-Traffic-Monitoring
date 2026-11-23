@@ -23,6 +23,16 @@ internal object PairingCrypto {
         return Base64.encodeToString(iv + cipher.doFinal(plain.toByteArray()), Base64.NO_WRAP)
     }
 
+    /** The same as [open] for binary content, such as a relayed video frame. */
+    fun openBytes(keyHex: String, sealed: String): ByteArray? = try {
+        val bytes = Base64.decode(sealed, Base64.DEFAULT)
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.DECRYPT_MODE, key(keyHex), GCMParameterSpec(128, bytes, 0, 12))
+        cipher.doFinal(bytes, 12, bytes.size - 12)
+    } catch (error: Exception) {
+        null
+    }
+
     fun open(keyHex: String, sealed: String): String? = try {
         val bytes = Base64.decode(sealed, Base64.DEFAULT)
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")

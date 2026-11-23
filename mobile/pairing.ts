@@ -14,7 +14,7 @@ export type Envelope = {
   from: Role;
   session: string;
   at: number;
-  type: 'ready' | 'hello' | 'offer' | 'answer' | 'bye';
+  type: 'ready' | 'hello' | 'offer' | 'answer' | 'bye' | 'relay';
   to?: string;
   sdp?: string;
 };
@@ -61,6 +61,16 @@ export class PairingChannel {
   private since = Math.floor(Date.now() / 1000) - 5;
   private timer: ReturnType<typeof setTimeout> | null = null;
   readonly session = Math.random().toString(36).slice(2, 10);
+
+  /** Where video frames arrive when the devices cannot reach each other directly. */
+  get frameTopic() {
+    return `skycop/${this.topic}/f`;
+  }
+
+  /** The pairing key, for the native frame decoder. */
+  get keyHex() {
+    return this.key;
+  }
 
   constructor(
     code: string,

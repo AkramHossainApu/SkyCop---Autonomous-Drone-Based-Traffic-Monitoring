@@ -16,21 +16,43 @@ function str(text: string): number[] {
   return [bytes.length >> 8, bytes.length & 0xff, ...bytes];
 }
 
-function packet(type: number, body: number[]): ArrayBuffer {
-  const length: number[] = [];
-  let n = body.length;
+function header(type: number, size: number): number[] {
+  const out = [type];
+  let n = size;
   do {
     let digit = n % 128;
     n = Math.floor(n / 128);
     if (n > 0) digit |= 0x80;
-    length.push(digit);
+    out.push(digit);
   } while (n > 0);
-  return new Uint8Array([type, ...length, ...body]).buffer;
+  return out;
+}
+
+function packet(type: number, body: number[]): ArrayBuffer {
+  return new Uint8Array([...header(type, body.length), ...body]).buffer;
+}
+
+/** A PUBLISH packet built straight into one buffer: frames of video are tens of kilobytes. */
+function publishPacket(topic: string, payload: string): ArrayBuffer {
+  const name = str(topic);
+  const head = header(0x30, name.length + payload.length);
+  const out = new Uint8Array(head.length + name.length + payload.length);
+  out.set(head, 0);
+  out.set(name, head.length);
+  const at = head.length + name.length;
+  for (let i = 0; i < payload.length; i++) out[at + i] = payload.charCodeAt(i) & 0xff;
+  return out.buffer;
+}
+
+function text(bytes: Uint8Array, from: number, to: number): string {
+  let out = '';
+  for (let i = from; i < to; i += 8192) out += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, Math.min(to, i + 8192))));
+  return out;
 }
 
 export class MqttLink {
   private socket: WebSocket | null = null;
-  private buffer: number[] = [];
+  private buffer = new Uint8Array(0);
   private ping: ReturnType<typeof setInterval> | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private retry = 0;
@@ -42,7 +64,14 @@ export class MqttLink {
     private readonly topic: string,
     private readonly onMessage: (payload: string) => void,
     private readonly onState: (ready: boolean, detail?: string) => void,
+    /** False for a link that only publishes (the camera's video frames), so nothing comes back down. */
+    private readonly listen = true,
   ) {}
+
+  /** Bytes still waiting to leave; the camera skips a frame rather than let video queue up. */
+  get backlog(): number {
+    return this.socket?.bufferedAmount ?? 0;
+  }
 
   open() {
     if (this.closed) return;
@@ -55,7 +84,7 @@ export class MqttLink {
     }
     socket.binaryType = 'arraybuffer';
     this.socket = socket;
-    this.buffer = [];
+    this.buffer = new Uint8Array(0);
     socket.onopen = () => {
       const clientId = `skycop${Math.random().toString(36).slice(2, 12)}`;
       // Protocol "MQTT" level 4, clean session, 60 s keep-alive.
@@ -64,7 +93,10 @@ export class MqttLink {
     socket.onmessage = (event) => {
       if (this.socket !== socket || !(event.data instanceof ArrayBuffer)) return;
       const bytes = new Uint8Array(event.data);
-      for (let i = 0; i < bytes.length; i++) this.buffer.push(bytes[i]);
+      const joined = new Uint8Array(this.buffer.length + bytes.length);
+      joined.set(this.buffer, 0);
+      joined.set(bytes, this.buffer.length);
+      this.buffer = joined;
       this.drain(socket);
     };
     let failure = '';
@@ -100,12 +132,19 @@ export class MqttLink {
       } while (byte & 0x80);
       if (this.buffer.length < index + length) return;
       const type = this.buffer[0] >> 4;
-      const body = this.buffer.slice(index, index + length);
+      const body = this.buffer.subarray(index, index + length);
       this.buffer = this.buffer.slice(index + length);
       if (type === 2) {
-        // CONNACK: subscribe once the broker accepts us.
+        // CONNACK: subscribe once the broker accepts us (or, publishing only, be ready at once).
         if (body[1] !== 0) { socket.close(); return; }
-        socket.send(packet(0x82, [0, 1, ...str(this.topic), 0]));
+        if (this.listen) {
+          socket.send(packet(0x82, [0, 1, ...str(this.topic), 0]));
+        } else {
+          this.retry = 0;
+          this.ready = true;
+          this.startPing(socket);
+          this.onState(true);
+        }
       } else if (type === 9) {
         // SUBACK
         this.retry = 0;
@@ -115,9 +154,7 @@ export class MqttLink {
       } else if (type === 3) {
         // PUBLISH at QoS 0: topic, then payload (no packet id).
         const topicLength = (body[0] << 8) | body[1];
-        let payload = '';
-        for (let i = 2 + topicLength; i < body.length; i++) payload += String.fromCharCode(body[i]);
-        this.onMessage(payload);
+        this.onMessage(text(body, 2 + topicLength, body.length));
       }
     }
   }
@@ -138,7 +175,7 @@ export class MqttLink {
   publish(payload: string): boolean {
     const socket = this.socket;
     if (!socket || !this.ready || socket.readyState !== 1) return false;
-    socket.send(packet(0x30, [...str(this.topic), ...ascii(payload)]));
+    socket.send(publishPacket(this.topic, payload));
     return true;
   }
 

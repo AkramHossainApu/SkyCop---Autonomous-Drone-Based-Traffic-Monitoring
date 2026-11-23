@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ICE_SERVERS, PairingChannel, waitForIceGathering, type Envelope } from './pairing';
+import { FrameSender } from './frameRelay';
+
+/** How long a direct link gets to come up before the video goes through the relay instead. */
+const DIRECT_TIMEOUT_MS = 12000;
+/** `?relay` in the page address skips the direct link, to try the relay on one network. */
+const FORCE_RELAY = new URLSearchParams(window.location.search).has('relay');
 
 export type BroadcastStatus = 'idle' | 'opening' | 'waiting' | 'connecting' | 'connected' | 'error';
 export type LogEntry = { at: Date; text: string };
@@ -12,6 +18,8 @@ export function useCameraBroadcast(stream: MediaStream | null, code: string) {
   const viewerRef = useRef('');
   const offeredAtRef = useRef(0);
   const refusedRef = useRef(new Set<string>());
+  const relayRef = useRef<FrameSender | null>(null);
+  const relayViewerRef = useRef('');
   const streamRef = useRef(stream);
   streamRef.current = stream;
   const [status, setStatus] = useState<BroadcastStatus>('idle');
@@ -30,11 +38,37 @@ export function useCameraBroadcast(stream: MediaStream | null, code: string) {
     setStats(null);
   }, []);
 
+  const stopRelay = useCallback(() => {
+    relayRef.current?.stop();
+    relayRef.current = null;
+    relayViewerRef.current = '';
+  }, []);
+
+  /** The devices cannot reach each other directly: send the video through the public brokers. */
+  const startRelay = useCallback((viewer: string) => {
+    const channel = channelRef.current;
+    const media = streamRef.current;
+    if (!channel || !media) return;
+    closePeer();
+    stopRelay();
+    relayViewerRef.current = viewer;
+    viewerRef.current = viewer;
+    void channel.send('relay', { to: viewer }).catch(() => undefined);
+    const sender = new FrameSender(channel.frameTopic, (bytes) => channel.sealBytes(bytes), media);
+    relayRef.current = sender;
+    sender.start();
+    setError('');
+    setStatus('connected');
+    note('No direct route to the phone: video goes through the relay');
+  }, [closePeer, note, stopRelay]);
+
   const offerTo = useCallback(async (viewer: string) => {
     const channel = channelRef.current;
     const media = streamRef.current;
     if (!channel || !media) return;
     closePeer();
+    stopRelay();
+    if (FORCE_RELAY) { startRelay(viewer); return; }
     viewerRef.current = viewer;
     offeredAtRef.current = Date.now();
     const peer = new RTCPeerConnection({ iceServers: ICE_SERVERS });
@@ -46,10 +80,8 @@ export function useCameraBroadcast(stream: MediaStream | null, code: string) {
         setStatus('connected');
         note('Video is live on the phone');
       } else if (peer.connectionState === 'failed') {
-        setStatus('waiting');
-        setError('The phone could not reach this device. Check that both are on the same Wi-Fi without guest isolation.');
-        note('Video connection failed');
-        closePeer();
+        note('Direct connection failed');
+        startRelay(viewer);
       } else if (peer.connectionState === 'disconnected') {
         // Wi-Fi hiccups recover by themselves; only give up if it stays down.
         window.setTimeout(() => {
@@ -66,12 +98,25 @@ export function useCameraBroadcast(stream: MediaStream | null, code: string) {
     if (peerRef.current !== peer || !peer.localDescription) return;
     await channel.send('offer', { to: viewer, sdp: peer.localDescription.sdp });
     note('Sent connection details to the phone');
-  }, [closePeer, note]);
+    // Different networks (Wi-Fi and mobile data) often cannot connect directly at all.
+    window.setTimeout(() => {
+      if (peerRef.current === peer && peer.connectionState !== 'connected') startRelay(viewer);
+    }, DIRECT_TIMEOUT_MS);
+  }, [closePeer, note, startRelay, stopRelay]);
 
   const handle = useCallback((message: Envelope) => {
     const channel = channelRef.current;
     if (!channel) return;
     if (message.type === 'hello') {
+      if (relayRef.current) {
+        // The phone that is watching through the relay missed the news: tell it again.
+        if (message.session === relayViewerRef.current) void channel.send('relay', { to: message.session }).catch(() => undefined);
+        else if (!refusedRef.current.has(message.session)) {
+          refusedRef.current.add(message.session);
+          note('Another phone tried to join; it can connect when this one leaves');
+        }
+        return;
+      }
       // A phone may say hello twice while one offer is in flight; answering both would race.
       const peer = peerRef.current;
       const busy = peer && message.session === viewerRef.current &&
@@ -99,9 +144,10 @@ export function useCameraBroadcast(stream: MediaStream | null, code: string) {
     } else if (message.type === 'bye' && message.session === viewerRef.current) {
       note('Phone left');
       closePeer();
+      stopRelay();
       setStatus('waiting');
     }
-  }, [closePeer, note, offerTo]);
+  }, [closePeer, note, offerTo, stopRelay]);
 
   const stop = useCallback(() => {
     const channel = channelRef.current;
@@ -110,9 +156,10 @@ export function useCameraBroadcast(stream: MediaStream | null, code: string) {
       void channel.send('bye').catch(() => undefined).finally(() => channel.close());
     }
     closePeer();
+    stopRelay();
     setStatus('idle');
     setError('');
-  }, [closePeer]);
+  }, [closePeer, stopRelay]);
 
   const start = useCallback(async () => {
     if (channelRef.current || !streamRef.current) return;
@@ -150,6 +197,7 @@ export function useCameraBroadcast(stream: MediaStream | null, code: string) {
   useEffect(() => () => {
     channelRef.current?.close();
     peerRef.current?.close();
+    relayRef.current?.stop();
   }, []);
 
   useEffect(() => {
@@ -161,6 +209,11 @@ export function useCameraBroadcast(stream: MediaStream | null, code: string) {
     if (status !== 'connected') return;
     let lastBytes = 0; let lastTime = 0;
     const timer = window.setInterval(async () => {
+      const relay = relayRef.current;
+      if (relay) {
+        setStats({ ...relay.stats, rttMs: null, route: 'through the relay' });
+        return;
+      }
       const peer = peerRef.current;
       if (!peer) return;
       const report = await peer.getStats();

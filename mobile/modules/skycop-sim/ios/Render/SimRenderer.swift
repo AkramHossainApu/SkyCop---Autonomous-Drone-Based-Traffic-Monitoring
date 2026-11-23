@@ -4,7 +4,7 @@ import os
 
 /// The game loop (SimRenderer.kt), run from MTKView's display link on the main thread.
 final class SimRenderer: NSObject, MTKViewDelegate {
-  private static let EYE_OFFSET: Float = 0.032, LENS_A: Float = 0.16, LENS_B: Float = 0.04, MAX_RENDER_HEIGHT = 1080
+  private static let EYE_OFFSET: Float = 0.032, MAX_RENDER_HEIGHT = 1080
   private static let log = Logger(subsystem: "com.skycop.sim", category: "SkyCopSim")
 
   private(set) var game: Game
@@ -270,7 +270,6 @@ final class SimRenderer: NSObject, MTKViewDelegate {
 
     let wanted: Float = settings.vr && settings.comfort ? ((game.camera.turnRate - 0.35) * 0.8).clamped(0, 0.7) : 0
     vignette += (wanted - vignette) * blend(6, dt)
-    let lens = settings.vr && settings.lensCorrection
     if let pass = view.currentRenderPassDescriptor {
       pass.colorAttachments[0].loadAction = .clear
       pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
@@ -284,7 +283,7 @@ final class SimRenderer: NSObject, MTKViewDelegate {
           var params = (
             SIMD4<Float>(Float(i) * part, 0, part, Float(usedHeight) / Float(targetSize.1)),
             SIMD4<Float>(0.5 / Float(targetSize.0), 0.5 / Float(targetSize.1), Float(screenWidth) / Float(eyes) / Float(screenHeight), lensShift(i)),
-            SIMD4<Float>(lens ? SimRenderer.LENS_A : 0, lens ? SimRenderer.LENS_B : 0, vignette, 0))
+            SIMD4<Float>(0, 0, vignette, 0))
           encoder.setFragmentBytes(&params, length: MemoryLayout<(SIMD4<Float>, SIMD4<Float>, SIMD4<Float>)>.stride, index: 0)
           encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         }
@@ -303,15 +302,9 @@ final class SimRenderer: NSObject, MTKViewDelegate {
     let eyes = settings.vr ? 2 : 1
     let eyeWidth = width / Float(eyes)
     let eye = Int(px / eyeWidth).clamped(0, eyes - 1)
-    var x = (px - Float(eye) * eyeWidth) / eyeWidth * 2 - 1 - lensShift(eye)
-    var y = py / height * 2 - 1
+    let x = (px - Float(eye) * eyeWidth) / eyeWidth * 2 - 1 - lensShift(eye)
+    let y = py / height * 2 - 1
     let aspect = eyeWidth / height
-    if settings.vr && settings.lensCorrection {
-      let qx = aspect > 1 ? x * aspect : x, qy = aspect > 1 ? y : y / aspect
-      let r2 = qx * qx + qy * qy
-      let k = (1 + SimRenderer.LENS_A * r2 + SimRenderer.LENS_B * r2 * r2) / (1 + SimRenderer.LENS_A + SimRenderer.LENS_B)
-      x *= k; y *= k
-    }
     let hudX = x * Hud.HALF_HEIGHT * aspect / hud.scale, hudY = y * Hud.HALF_HEIGHT / hud.scale
     if game.screen == .flight { return settings.vr || game.watchingLive ? Button.START : 0 }
     let row = hud.menuRowAt(hudX, hudY)

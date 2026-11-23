@@ -21,7 +21,7 @@ export type Envelope = {
   from: Role;
   session: string;
   at: number;
-  type: 'ready' | 'hello' | 'offer' | 'answer' | 'bye';
+  type: 'ready' | 'hello' | 'offer' | 'answer' | 'bye' | 'relay';
   to?: string;
   sdp?: string;
 };
@@ -52,7 +52,7 @@ async function sha256(text: string) {
 
 function toBase64(bytes: Uint8Array) {
   let binary = '';
-  bytes.forEach((b) => { binary += String.fromCharCode(b); });
+  for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
   return btoa(binary);
 }
 
@@ -88,6 +88,21 @@ export class PairingChannel {
   private openedAt = 0;
   private since = Math.floor(Date.now() / 1000) - 5;
   readonly session = Math.random().toString(36).slice(2, 10);
+
+  /** Where video frames go when the devices cannot reach each other directly. */
+  get frameTopic() {
+    return `skycop/${this.topic}/f`;
+  }
+
+  /** Encrypts bytes with the pairing key: base64 of iv + ciphertext + tag, as the phone's native open() expects. */
+  async sealBytes(bytes: Uint8Array): Promise<string> {
+    if (!this.key) throw new Error('Not open');
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const cipher = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, this.key, bytes);
+    const sealed = new Uint8Array(12 + cipher.byteLength);
+    sealed.set(iv); sealed.set(new Uint8Array(cipher), 12);
+    return toBase64(sealed);
+  }
 
   constructor(
     private readonly code: string,

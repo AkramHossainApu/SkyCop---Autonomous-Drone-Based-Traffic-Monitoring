@@ -314,7 +314,6 @@ final class Hud {
     case .invertClimb: return onOff(s.invertClimb)
     case .invertLook: return onOff(s.invertLook)
     case .head: return onOff(s.headTracking)
-    case .lens: return onOff(s.lensCorrection)
     case .comfort: return onOff(s.comfort)
     case .shadows: return onOff(s.shadows)
     case .wind: return onOff(s.wind)

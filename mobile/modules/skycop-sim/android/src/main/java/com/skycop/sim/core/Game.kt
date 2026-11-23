@@ -38,7 +38,6 @@ enum class MenuItem(val label: String) {
     INVERT_LOOK("INVERT CAMERA TILT"),
     VR("DISPLAY"),
     HEAD("HEAD TRACKING"),
-    LENS("LENS CORRECTION"),
     SPACING("LENS SPACING"),
     COMFORT("COMFORT VIGNETTE"),
     SHADOWS("SHADOWS"),
@@ -310,7 +309,6 @@ class Game(val city: City, val settings: Settings, private var host: GameHost, v
                 s.headTracking = !s.headTracking
                 host.recenterHead()
             }
-            MenuItem.LENS -> s.lensCorrection = !s.lensCorrection
             MenuItem.COMFORT -> s.comfort = !s.comfort
             MenuItem.SHADOWS -> s.shadows = !s.shadows
             MenuItem.WIND -> s.wind = !s.wind

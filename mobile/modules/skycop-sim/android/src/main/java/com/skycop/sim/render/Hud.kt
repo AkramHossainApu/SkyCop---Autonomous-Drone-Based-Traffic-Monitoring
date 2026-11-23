@@ -256,7 +256,6 @@ internal class Hud(private val batch: HudBatch) {
         MenuItem.INVERT_CLIMB -> onOff(s.invertClimb)
         MenuItem.INVERT_LOOK -> onOff(s.invertLook)
         MenuItem.HEAD -> onOff(s.headTracking)
-        MenuItem.LENS -> onOff(s.lensCorrection)
         MenuItem.COMFORT -> onOff(s.comfort)
         MenuItem.SHADOWS -> onOff(s.shadows)
         MenuItem.WIND -> onOff(s.wind)

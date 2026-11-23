@@ -46,7 +46,7 @@ export default function App() {
   const [notice, setNotice] = useState('');
   const [scanning, setScanning] = useState(false);
   const simulationOpen = useRef(false);
-  const live = link.status === 'live' && link.stream !== null;
+  const live = link.status === 'live' && (link.stream !== null || link.relayFrame !== null);
   const liveRef = useRef(live);
   liveRef.current = live;
   const codeValid = CODE_PATTERN.test(typed);
@@ -82,7 +82,8 @@ export default function App() {
 
   // The native VR view shows the live camera too, so it always knows the current stream.
   useEffect(() => {
-    SkyCopSim?.setLiveStream(live && link.stream ? link.stream.toURL() : null);
+    // "relay" tells the VR view to show the frames that come through the brokers.
+    SkyCopSim?.setLiveStream(live ? (link.stream ? link.stream.toURL() : 'relay') : null);
   }, [live, link.stream]);
 
   async function openVr(startLive: boolean) {
@@ -144,7 +145,15 @@ export default function App() {
 
         <View style={styles.panel}>
           <View style={styles.viewport}>
-            {link.stream ? <RemoteVideo stream={link.stream} fit="contain" /> : (
+            {link.stream ? <RemoteVideo stream={link.stream} fit="contain" /> : link.relayFrame ? (
+              <Image
+                source={{ uri: `data:image/jpeg;base64,${link.relayFrame}` }}
+                style={StyleSheet.absoluteFill}
+                resizeMode="contain"
+                fadeDuration={0}
+                accessibilityLabel="Live camera, through the relay"
+              />
+            ) : (
               <View style={styles.viewportEmpty}>
                 <Text style={styles.viewportText}>{link.status === 'idle' ? 'No camera connected' : 'Waiting for video…'}</Text>
               </View>
@@ -204,7 +213,7 @@ export default function App() {
             </Pressable>
           )}
           {(notice || link.error) ? <Text style={styles.error}>{notice || link.error}</Text> : null}
-          <Text style={styles.help}>On the camera device, open the SkyCop website and tap Start camera. Both devices need the same Wi-Fi.</Text>
+          <Text style={styles.help}>On the camera device, open the SkyCop website and tap Start camera. Any network works: Wi-Fi or mobile data.</Text>
         </View>
 
         <View style={[styles.panel, styles.panelPad, styles.simPanel]}>

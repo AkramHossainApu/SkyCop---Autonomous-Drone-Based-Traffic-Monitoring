@@ -14,12 +14,12 @@ protocol GameHost: AnyObject {
 
 enum MenuItem: Int, CaseIterable {
   case resume, exit, map, time, weather, layout, controls, calibrate, defaultMapping, sensitivity, deadzone, invertClimb, invertLook
-  case vr, head, lens, spacing, comfort, shadows, wind, sound, restart
+  case vr, head, spacing, comfort, shadows, wind, sound, restart
 
   var label: String {
     ["RESUME FLIGHT", "EXIT SIMULATION", "MAP", "TIME OF DAY", "WEATHER", "CONTROL LAYOUT", "SHOW CONTROLS", "CALIBRATE CONTROLLER", "RESET CONTROLLER MAPPING",
      "TURN SENSITIVITY", "STICK DEADZONE", "INVERT CLIMB STICK", "INVERT CAMERA TILT", "DISPLAY", "HEAD TRACKING",
-     "LENS CORRECTION", "LENS SPACING", "COMFORT VIGNETTE", "SHADOWS", "WIND", "ROTOR SOUND", "RESTART FLIGHT"][rawValue]
+     "LENS SPACING", "COMFORT VIGNETTE", "SHADOWS", "WIND", "ROTOR SOUND", "RESTART FLIGHT"][rawValue]
   }
 }
 
@@ -265,7 +265,6 @@ final class Game {
     case .invertLook: s.invertLook.toggle()
     case .vr: s.vr.toggle()
     case .head: s.headTracking.toggle(); host?.recenterHead()
-    case .lens: s.lensCorrection.toggle()
     case .comfort: s.comfort.toggle()
     case .shadows: s.shadows.toggle()
     case .wind: s.wind.toggle()

@@ -33,8 +33,6 @@ internal class SimRenderer(
     companion object {
         const val TAG = "SkyCopSim"
         private const val EYE_OFFSET = 0.032f
-        private const val LENS_A = 0.16f
-        private const val LENS_B = 0.04f
     }
 
     @Volatile var inFlight = true
@@ -282,12 +280,12 @@ internal class SimRenderer(
         val wanted =
             if (settings.vr && settings.comfort) ((game.camera.turnRate - 0.35f) * 0.8f).coerceIn(0f, 0.7f) else 0f
         vignette += (wanted - vignette) * blend(6f, dt)
-        val lens = settings.vr && settings.lensCorrection
+        // No lens pre-warp: it magnified the middle of each eye, which looked like a zoom.
         presenter.begin()
         for (i in 0 until eyes) {
             presenter.eye(
                 target, i, eyes, eyeWidth * eyes, usedHeight, screenWidth, screenHeight,
-                if (lens) LENS_A else 0f, if (lens) LENS_B else 0f, lensShift(i), vignette,
+                0f, 0f, lensShift(i), vignette,
             )
         }
     }
@@ -302,17 +300,9 @@ internal class SimRenderer(
         val eyes = if (settings.vr) 2 else 1
         val eyeWidth = screenWidth.toFloat() / eyes
         val eye = (tapX / eyeWidth).toInt().coerceIn(0, eyes - 1)
-        var x = (tapX - eye * eyeWidth) / eyeWidth * 2f - 1f - lensShift(eye)
-        var y = tapY / screenHeight * 2f - 1f
+        val x = (tapX - eye * eyeWidth) / eyeWidth * 2f - 1f - lensShift(eye)
+        val y = tapY / screenHeight * 2f - 1f
         val aspect = eyeWidth / screenHeight
-        if (settings.vr && settings.lensCorrection) {
-            // Same mapping as the present shader, so a tap lands on what is drawn under the finger.
-            val qx = if (aspect > 1f) x * aspect else x
-            val qy = if (aspect > 1f) y else y / aspect
-            val r2 = qx * qx + qy * qy
-            val k = (1 + LENS_A * r2 + LENS_B * r2 * r2) / (1 + LENS_A + LENS_B)
-            x *= k; y *= k
-        }
         val hudX = x * Hud.HALF_HEIGHT * aspect / hud.scale
         val hudY = y * Hud.HALF_HEIGHT / hud.scale
         if (game.screen == Screen.FLIGHT) return if (settings.vr || game.watchingLive) Button.START else 0

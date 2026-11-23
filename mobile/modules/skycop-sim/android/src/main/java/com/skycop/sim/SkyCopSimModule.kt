@@ -63,6 +63,13 @@ class SkyCopSimModule : Module() {
         Function("sha256Hex") { text: String -> PairingCrypto.sha256Hex(text) }
         Function("seal") { keyHex: String, plain: String -> PairingCrypto.seal(keyHex, plain) }
         Function("open") { keyHex: String, sealed: String -> PairingCrypto.open(keyHex, sealed) }
+        Function("openFrame") { keyHex: String, sealed: String ->
+            val jpeg = PairingCrypto.openBytes(keyHex, sealed)
+            if (jpeg == null) null else {
+                LiveFeed.pushJpeg(jpeg)
+                android.util.Base64.encodeToString(jpeg, android.util.Base64.NO_WRAP)
+            }
+        }
         Function("loadValue") { key: String ->
             appContext.reactContext?.getSharedPreferences("skycop-app", android.content.Context.MODE_PRIVATE)?.getString(key, null)
         }

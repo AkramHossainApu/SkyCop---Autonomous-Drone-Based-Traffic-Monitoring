@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ICE_SERVERS, PairingChannel, type Envelope } from './pairing';
 import { RTCPeerConnection, RTCSessionDescription, type MediaStream } from './webrtc';
+import { FrameReceiver } from './frameRelay';
 
 export type LinkStatus = 'idle' | 'searching' | 'connecting' | 'live' | 'error';
 
@@ -25,8 +26,12 @@ export function useCameraLink() {
   const peerRef = useRef<RTCPeerConnection | null>(null);
   const cameraRef = useRef('');
   const helloTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const relayRef = useRef<FrameReceiver | null>(null);
+  const lastFrameAt = useRef(0);
   const [status, setStatus] = useState<LinkStatus>('idle');
   const [stream, setStream] = useState<MediaStream | null>(null);
+  /** The newest frame (base64 JPEG) while the video comes through the relay, else null. */
+  const [relayFrame, setRelayFrame] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [code, setCode] = useState('');
 
@@ -37,6 +42,12 @@ export function useCameraLink() {
     setStream(null);
   }, []);
 
+  const stopRelay = useCallback(() => {
+    relayRef.current?.close();
+    relayRef.current = null;
+    setRelayFrame(null);
+  }, []);
+
   // Says hello until a camera answers, so the order in which the two sides start does not matter.
   // The gap grows from 4 s to 30 s; the camera also prompts a hello whenever it comes online.
   const keepAsking = useCallback(() => {
@@ -44,7 +55,7 @@ export function useCameraLink() {
     let gap = 4000;
     const ask = () => {
       const channel = channelRef.current;
-      if (!channel || peerRef.current) return;
+      if (!channel || peerRef.current || relayRef.current) return;
       channel.send('hello').then(() => {
         if (channelRef.current === channel) setError((current) => (current.startsWith('Can\'t reach') ? '' : current));
       }).catch((caught: unknown) => {
@@ -61,6 +72,7 @@ export function useCameraLink() {
     const channel = channelRef.current;
     if (!channel || !message.sdp) return;
     closePeer();
+    stopRelay();
     cameraRef.current = message.session;
     const peer = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     peerRef.current = peer;
@@ -76,10 +88,9 @@ export function useCameraLink() {
         setStatus('live');
         setError('');
       } else if (state === 'failed') {
-        setError('Could not reach the camera. Check that both devices are on the same Wi-Fi.');
+        // The camera switches to the relay when the direct link fails; just wait for it.
         closePeer();
-        setStatus('searching');
-        setTimeout(keepAsking, 3000);
+        setStatus('connecting');
       } else if (state === 'disconnected') {
         setTimeout(() => {
           if (peerRef.current !== peer || peer.connectionState === 'connected') return;
@@ -94,7 +105,37 @@ export function useCameraLink() {
     await waitForIce(peer);
     if (peerRef.current !== peer || !peer.localDescription?.sdp) return;
     await channel.send('answer', { to: message.session, sdp: peer.localDescription.sdp });
-  }, [closePeer, keepAsking]);
+  }, [closePeer, keepAsking, stopRelay]);
+
+  /** The camera cannot reach this phone directly: watch the frames it sends through the relay. */
+  const watchRelay = useCallback((camera: string) => {
+    const channel = channelRef.current;
+    if (!channel || relayRef.current) return;
+    closePeer();
+    cameraRef.current = camera;
+    lastFrameAt.current = Date.now();
+    setStatus('connecting');
+    const receiver = new FrameReceiver(channel.frameTopic, channel.keyHex, (jpeg) => {
+      if (relayRef.current !== receiver) return;
+      lastFrameAt.current = Date.now();
+      setRelayFrame(jpeg);
+      setStatus('live');
+      setError('');
+    });
+    relayRef.current = receiver;
+    receiver.open();
+  }, [closePeer]);
+
+  // Frames stopped coming: the camera went away, so look for it again.
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (!relayRef.current || Date.now() - lastFrameAt.current < 12000) return;
+      stopRelay();
+      setStatus('searching');
+      keepAsking();
+    }, 2000);
+    return () => clearInterval(timer);
+  }, [keepAsking, stopRelay]);
 
   const disconnect = useCallback(() => {
     if (helloTimer.current) clearTimeout(helloTimer.current);
@@ -102,9 +143,10 @@ export function useCameraLink() {
     channelRef.current = null;
     if (channel) void channel.send('bye').catch(() => undefined).finally(() => channel.close());
     closePeer();
+    stopRelay();
     setStatus('idle');
     setError('');
-  }, [closePeer]);
+  }, [closePeer, stopRelay]);
 
   const connect = useCallback((pairingCode: string) => {
     disconnect();
@@ -114,7 +156,8 @@ export function useCameraLink() {
     try {
       const channel = new PairingChannel(pairingCode, 'viewer', (message) => {
         if (channelRef.current !== channel) return;
-        if (message.type === 'ready' && !peerRef.current) void channel.send('hello').catch(() => undefined);
+        if (message.type === 'ready' && !peerRef.current && !relayRef.current) void channel.send('hello').catch(() => undefined);
+        else if (message.type === 'relay' && message.to === channel.session) watchRelay(message.session);
         else if (message.type === 'offer' && message.to === channel.session) {
           void answer(message).catch(() => {
             setError('The camera sent connection details this phone could not use.');
@@ -123,6 +166,7 @@ export function useCameraLink() {
           });
         } else if (message.type === 'bye' && message.session === cameraRef.current) {
           closePeer();
+          stopRelay();
           setStatus('searching');
           setError('The camera stopped. It reconnects when the camera starts again.');
         }
@@ -143,13 +187,14 @@ export function useCameraLink() {
       setStatus('error');
       setError(caught instanceof Error ? caught.message : 'Could not start pairing.');
     }
-  }, [answer, closePeer, disconnect, keepAsking]);
+  }, [answer, closePeer, disconnect, keepAsking, stopRelay, watchRelay]);
 
   useEffect(() => () => {
     if (helloTimer.current) clearTimeout(helloTimer.current);
     channelRef.current?.close();
     peerRef.current?.close();
+    relayRef.current?.close();
   }, []);
 
-  return { status, stream, error, code, connect, disconnect };
+  return { status, stream, relayFrame, error, code, connect, disconnect };
 }
