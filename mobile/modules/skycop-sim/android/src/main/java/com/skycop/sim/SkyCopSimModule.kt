@@ -70,9 +70,9 @@ class SkyCopSimModule : Module() {
                 android.util.Base64.encodeToString(jpeg, android.util.Base64.NO_WRAP)
             }
         }
-        Function("openVideo") { keyHex: String, sealed: String, gap: Boolean ->
+        Function("openVideo") { keyHex: String, sealed: String, gap: Boolean, capturedMs: Double ->
             val unit = PairingCrypto.openBytes(keyHex, sealed)
-            if (unit == null) null else RelayVideo.push(unit, gap)
+            if (unit == null) null else RelayVideo.push(unit, gap, capturedMs.toLong())
         }
         Function("closeVideo") { RelayVideo.close() }
         Function("loadValue") { key: String ->

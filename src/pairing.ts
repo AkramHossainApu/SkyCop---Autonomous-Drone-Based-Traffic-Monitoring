@@ -21,7 +21,7 @@ export type Envelope = {
   from: Role;
   session: string;
   at: number;
-  type: 'ready' | 'hello' | 'offer' | 'answer' | 'bye' | 'relay' | 'watching';
+  type: 'ready' | 'hello' | 'offer' | 'answer' | 'bye' | 'relay' | 'watching' | 'key';
   to?: string;
   sdp?: string;
 };

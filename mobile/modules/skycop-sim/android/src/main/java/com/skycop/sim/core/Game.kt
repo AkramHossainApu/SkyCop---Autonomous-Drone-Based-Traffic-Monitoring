@@ -78,6 +78,17 @@ class Game(val city: City, val settings: Settings, private var host: GameHost, v
     val liveBasis = FloatArray(16).also { Mat4.identity(it) }
     var liveSince = 0f
         private set
+    /** Opened with Watch in VR: only the picture, and an Exit button for a few seconds after a tap. */
+    var liveOnly = false
+        private set
+    var exitShownUntil = -1f
+        private set
+    val exitShown get() = clock < exitShownUntil
+
+    /** A tap on the live picture: shows the Exit button, or exits when it was already showing. */
+    fun liveTap(onExit: Boolean) {
+        if (exitShown && onExit) host.exit(false) else exitShownUntil = clock + 5f
+    }
 
     private val input = PilotInput()
     private var toastUntil = 0f
@@ -113,7 +124,7 @@ class Game(val city: City, val settings: Settings, private var host: GameHost, v
         clock += dt
         if (toast != null && clock > toastUntil) toast = null
 
-        if (watchingLive && !liveAvailable) {
+        if (watchingLive && !liveAvailable && !liveOnly) {
             watchingLive = false
             show("LIVE CAMERA DISCONNECTED")
         }
@@ -209,8 +220,9 @@ class Game(val city: City, val settings: Settings, private var host: GameHost, v
         if (before == Phase.LANDED && drone.phase == Phase.TAKEOFF) host.recenterHead()
     }
 
-    fun watchLive() {
-        if (!liveAvailable) return
+    fun watchLive(only: Boolean = false) {
+        if (!liveAvailable && !only) return
+        liveOnly = only
         watchingLive = true
         liveSince = clock
         screen = Screen.FLIGHT
@@ -218,6 +230,11 @@ class Game(val city: City, val settings: Settings, private var host: GameHost, v
     }
 
     private fun watch(pressed: Int) {
+        if (liveOnly) {
+            if (pressed and (Button.START or Button.B) != 0) host.exit(false)
+            if (pressed and (Button.R3 or Button.SELECT) != 0) host.recenterHead()
+            return
+        }
         if (pressed and Button.START != 0) { openMenu(); return }
         if (pressed and (Button.X or Button.B) != 0) {
             watchingLive = false

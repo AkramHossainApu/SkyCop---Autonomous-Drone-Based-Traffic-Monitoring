@@ -122,12 +122,18 @@ final class SimulationViewController: UIViewController, GameHost {
 
   // MARK: Touch
 
+  /// Flying without a controller or headset: touches drive the on-screen sticks. Everywhere else
+  /// (menus, the live camera) a touch is a tap.
+  private func usesTouchSticks(_ renderer: SimRenderer) -> Bool {
+    renderer.game.screen == .flight && !renderer.game.watchingLive && !Session.settings.vr && renderer.game.controllerName == nil
+  }
+
   override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
     guard let renderer, let view = metalView else { return }
     let size = view.bounds.size
     for t in touches {
       let p = t.location(in: view)
-      if renderer.game.screen == .flight && !Session.settings.vr && renderer.game.controllerName == nil {
+      if usesTouchSticks(renderer) {
         renderer.touchPresses |= renderer.touch.began(ObjectIdentifier(t), Float(p.x), Float(p.y), Float(size.width), Float(size.height))
       } else {
         dragStartY = p.y; dragLastY = p.y; dragged = false
@@ -157,8 +163,7 @@ final class SimulationViewController: UIViewController, GameHost {
     let size = view.bounds.size
     for t in touches {
       renderer.touch.ended(ObjectIdentifier(t))
-      let flightSticks = renderer.game.screen == .flight && !Session.settings.vr && renderer.game.controllerName == nil
-      if !flightSticks && !dragged {
+      if !usesTouchSticks(renderer) && !dragged {
         let p = t.location(in: view)
         renderer.touchPresses |= renderer.tap(Float(p.x), Float(p.y), Float(size.width), Float(size.height))
       }

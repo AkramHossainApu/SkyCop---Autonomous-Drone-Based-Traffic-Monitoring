@@ -210,15 +210,15 @@ internal class SimRenderer(
             game.scroll(-pendingScroll)
             pendingScroll = 0
         }
+        game.liveAvailable = LiveFeed.available
+        // Before taps: a tap while the view was opening must not count as a press in the live view.
+        if (startLive) {
+            startLive = false
+            game.watchLive(only = true)
+        }
         if (pendingTap) {
             pendingTap = false
             pressed = pressed or handleTap(game, hud)
-        }
-
-        game.liveAvailable = LiveFeed.available
-        if (startLive) {
-            startLive = false
-            game.watchLive()
         }
         val tracked = settings.headTracking && settings.vr && head.available
         head.read(headPose, tracked)
@@ -305,6 +305,10 @@ internal class SimRenderer(
         val aspect = eyeWidth / screenHeight
         val hudX = x * Hud.HALF_HEIGHT * aspect / hud.scale
         val hudY = y * Hud.HALF_HEIGHT / hud.scale
+        if (game.screen == Screen.FLIGHT && game.watchingLive && game.liveOnly) {
+            game.liveTap(hud.exitHit(hudX, hudY))
+            return 0
+        }
         if (game.screen == Screen.FLIGHT) return if (settings.vr || game.watchingLive) Button.START else 0
         val row = hud.menuRowAt(hudX, hudY)
         if (row >= 0) game.activate(row)

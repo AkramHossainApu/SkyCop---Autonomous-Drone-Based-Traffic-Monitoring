@@ -52,6 +52,15 @@ final class Game {
   /// The live picture is fixed to the view, not the room: no head tracking, always straight ahead.
   let liveBasis: [Float] = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
   private(set) var liveSince: Float = 0
+  /// Opened with Watch in VR: only the picture, and an Exit button for a few seconds after a tap.
+  private(set) var liveOnly = false
+  private(set) var exitShownUntil: Float = -1
+  var exitShown: Bool { clock < exitShownUntil }
+
+  /// A tap on the live picture: shows the Exit button, or exits when it was already showing.
+  func liveTap(onExit: Bool) {
+    if exitShown && onExit { host?.exit(toLiveVideo: false) } else { exitShownUntil = clock + 5 }
+  }
 
   private let input = PilotInput()
   private var toastUntil: Float = 0
@@ -87,7 +96,7 @@ final class Game {
   func update(_ dt: Float, _ pad: PadState, _ pressed: Int, _ mapping: InputMapping, _ raw: [Float], _ head: [Float], _ tracked: Bool) {
     clock += dt
     if toast != nil && clock > toastUntil { toast = nil }
-    if watchingLive && !liveAvailable {
+    if watchingLive && !liveAvailable && !liveOnly {
       watchingLive = false
       show("LIVE CAMERA DISCONNECTED")
     }
@@ -105,8 +114,9 @@ final class Game {
     camera.update(screen == .flight ? dt : 0, drone.render, settings.vr, tracked, head)
   }
 
-  func watchLive() {
-    guard liveAvailable else { return }
+  func watchLive(only: Bool = false) {
+    guard liveAvailable || only else { return }
+    liveOnly = only
     watchingLive = true
     liveSince = clock
     screen = .flight
@@ -114,6 +124,11 @@ final class Game {
   }
 
   private func watch(_ pressed: Int) {
+    if liveOnly {
+      if pressed & (Button.START | Button.B) != 0 { host?.exit(toLiveVideo: false) }
+      if pressed & (Button.R3 | Button.SELECT) != 0 { host?.recenterHead() }
+      return
+    }
     if pressed & Button.START != 0 { openMenu(); return }
     if pressed & (Button.X | Button.B) != 0 {
       watchingLive = false

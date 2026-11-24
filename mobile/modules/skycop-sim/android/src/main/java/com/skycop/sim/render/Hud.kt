@@ -8,6 +8,8 @@ import kotlin.math.*
 internal class Hud(private val batch: HudBatch) {
     companion object {
         const val HALF_HEIGHT = 270f
+        private const val EXIT_W = 84f
+        private const val EXIT_H = 34f
         private const val WHITE = 0xF2F6F7
         private const val MUTED = 0x9DB0B8
         private const val ACCENT = 0x58E6FF
@@ -157,12 +159,29 @@ internal class Hud(private val batch: HudBatch) {
         val size = if (vr) 13f else 15f
         // Labels only for the first seconds, then the picture alone.
         val fresh = game.clock - game.liveSince < 5f
+        if (game.liveOnly) {
+            // Only the picture; a tap brings up an Exit button in the corner for a few seconds.
+            if (!game.liveHasVideo) tag("WAITING FOR VIDEO", 0f, 0f, size + 2f, WARN, 0.5f)
+            exitX = w; exitY = -h
+            if (game.exitShown) {
+                batch.color(PANEL, 0.75f); batch.rect(w - EXIT_W, -h, EXIT_W, EXIT_H)
+                batch.color(DANGER, 0.9f); batch.rect(w - EXIT_W, -h + EXIT_H - 2f, EXIT_W, 2f)
+                batch.color(WHITE); batch.text("EXIT", w - EXIT_W / 2f, -h + (EXIT_H - 16f) / 2f, 16f, 0.5f)
+            }
+            return
+        }
         if (!game.liveHasVideo) tag("WAITING FOR VIDEO", 0f, 0f, size + 2f, WARN, 0.5f)
         else if (fresh) tag("LIVE CAMERA", -w, -h, size, GOOD, 0f)
         if (fresh) {
             tag(if (game.controllerName == null) "TAP: MENU" else "X OR B: SIMULATION   START: MENU", 0f, h - size, size, MUTED, 0.5f)
         }
     }
+
+    private var exitX = 0f
+    private var exitY = 0f
+
+    /** Whether a tap at this HUD point lands on the live view's Exit button (with some slack). */
+    fun exitHit(x: Float, y: Float) = x > exitX - EXIT_W - 24f && y < exitY + EXIT_H + 24f
 
     private fun horizon(pose: DronePose) {
         val c = cos(pose.roll) * 70f; val s = sin(pose.roll) * 70f

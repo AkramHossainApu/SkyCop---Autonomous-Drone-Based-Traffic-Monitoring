@@ -14,7 +14,7 @@ export type Envelope = {
   from: Role;
   session: string;
   at: number;
-  type: 'ready' | 'hello' | 'offer' | 'answer' | 'bye' | 'relay' | 'watching';
+  type: 'ready' | 'hello' | 'offer' | 'answer' | 'bye' | 'relay' | 'watching' | 'key';
   to?: string;
   sdp?: string;
 };
@@ -46,6 +46,14 @@ export function formatTyping(value: string): string {
   return [letters.slice(0, 3), letters.slice(3, 6), letters.slice(6)].filter(Boolean).join('-');
 }
 
+function stableSession(): string {
+  const saved = SkyCopSim?.loadValue('viewer-session');
+  if (saved && /^[a-z0-9]{8,12}$/.test(saved)) return saved;
+  const fresh = Math.random().toString(36).slice(2, 10).padEnd(8, '0');
+  SkyCopSim?.saveValue('viewer-session', fresh);
+  return fresh;
+}
+
 export class PairingChannel {
   private socket: WebSocket | null = null;
   private links: MqttLink[] = [];
@@ -60,7 +68,11 @@ export class PairingChannel {
   private parts = new Map<string, string[]>();
   private since = Math.floor(Date.now() / 1000) - 5;
   private timer: ReturnType<typeof setTimeout> | null = null;
-  readonly session = Math.random().toString(36).slice(2, 10);
+  /**
+   * Who this end is. The phone keeps one for good, so a camera that is still sending to it
+   * recognises it straight away after the app is reopened, instead of taking it for another phone.
+   */
+  readonly session = stableSession();
 
   /** Where video frames arrive when the devices cannot reach each other directly. */
   get frameTopic() {

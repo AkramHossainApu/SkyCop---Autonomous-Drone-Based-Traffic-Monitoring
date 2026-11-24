@@ -64,10 +64,10 @@ public class SkyCopSimModule: Module {
       return jpeg.base64EncodedString()
     }
 
-    Function("openVideo") { (keyHex: String, sealed: String, gap: Bool) -> String? in
+    Function("openVideo") { (keyHex: String, sealed: String, gap: Bool, capturedMs: Double) -> String? in
       guard let data = Data(base64Encoded: sealed), let box = try? AES.GCM.SealedBox(combined: data),
             let unit = try? AES.GCM.open(box, using: SymmetricKey(data: Self.bytes(keyHex))) else { return nil }
-      return RelayVideo.shared.push(unit, gap: gap)
+      return RelayVideo.shared.push(unit, gap: gap, captured: capturedMs)
     }
 
     Function("closeVideo") { RelayVideo.shared.close() }

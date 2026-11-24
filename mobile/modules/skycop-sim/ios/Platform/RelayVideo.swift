@@ -4,12 +4,43 @@ import CoreMedia
 import Foundation
 import VideoToolbox
 
+/// Plays relay frames at the pace they were filmed (Pacer in RelayVideo.kt has the same logic): each
+/// frame shows at its capture time plus a delay just long enough to cover how unevenly they arrive.
+final class Pacer {
+  private var delays = [Double](repeating: 0, count: 90)
+  private var count = 0, next = 0
+  private var lastDue = 0.0
+  /// Extra delay after a frame came too late: the picture pauses once instead of rushing to catch up.
+  private var shift = 0.0
+
+  /// The local media time (seconds) at which a frame captured at `captured` (camera ms) should show.
+  func due(captured: Double, arrived: Double) -> Double {
+    let raw = arrived * 1000 - captured
+    if count > 0 && abs(raw - delays[(next + delays.count - 1) % delays.count]) > 4000 { count = 0; next = 0 }
+    delays[next] = raw; next = (next + 1) % delays.count; if count < delays.count { count += 1 }
+    let sorted = delays[0..<count].sorted()
+    let fastest = sorted[0], slow = sorted[((count - 1) * 95) / 100]
+    let buffer = min(1000, max(100, slow - fastest + 60))
+    // Running late eases back down a little with every frame (about 30 ms a second).
+    if shift > 0 { shift = max(0, shift - 0.002) }
+    var due = (captured + fastest + buffer) / 1000 + shift
+    let now = CACurrentMediaTime()
+    if due < now { shift += now - due; due = now }
+    if due < lastDue { due = lastDue }
+    if due > now + 1.5 { shift = 0; due = now }
+    lastDue = due
+    return due
+  }
+
+  func reset() { count = 0; next = 0; lastDue = 0; shift = 0 }
+}
+
 /// Decodes the H.264 video that comes through the relay with VideoToolbox and hands each picture to
 /// LiveFeed (see RelayVideo.kt). Each message is one access unit in Annex B form; key frames carry
 /// SPS and PPS. A preview JPEG of the newest picture is made a few times a second for the app's screen.
 final class RelayVideo {
   static let shared = RelayVideo()
-  private static let previewInterval = 0.16
+  private static let previewInterval = 0.5
 
   private let worker = DispatchQueue(label: "SkyCopRelayVideo")
   private let lock = NSLock()
@@ -23,13 +54,19 @@ final class RelayVideo {
   private var sps = Data(), pps = Data()
   private var waitKey = true
   private var lastPreview = 0.0
+  private let pacer = Pacer()
+  private var due = 0.0
+  /// Shows decoded frames when they are due.
+  private let display = DispatchQueue(label: "SkyCopRelayDisplay")
+  private var waitingFrames = 0
   private let images = CIContext(options: [.cacheIntermediates: false])
 
   /// Queues one access unit; `gap` says frames were lost before it. Returns a new preview, if any.
-  func push(_ unit: Data, gap: Bool) -> String? {
+  func push(_ unit: Data, gap: Bool, captured: Double) -> String? {
+    let arrived = CACurrentMediaTime()
     lock.lock()
     // A decoder that cannot keep up drops whole stretches up to the next key frame.
-    let full = queued > 4
+    let full = queued > 40
     if full { dropped = true } else { queued += 1 }
     let out = preview
     preview = nil
@@ -37,6 +74,7 @@ final class RelayVideo {
     if !full {
       worker.async { [weak self] in
         guard let self else { return }
+        self.due = self.pacer.due(captured: captured, arrived: arrived)
         self.decode(unit, gap: gap)
         self.lock.lock(); self.queued -= 1; self.lock.unlock()
       }
@@ -50,6 +88,7 @@ final class RelayVideo {
   }
 
   private func reset() {
+    pacer.reset()
     if let session { VTDecompressionSessionInvalidate(session) }
     session = nil
     format = nil
@@ -116,7 +155,7 @@ final class RelayVideo {
     var flags = VTDecodeInfoFlags()
     let status = VTDecompressionSessionDecodeFrame(session, sampleBuffer: sample, flags: [], infoFlagsOut: &flags) { [weak self] status, _, image, _, _ in
       guard let self, status == noErr, let image else { return }
-      self.show(image)
+      self.schedule(image)
     }
     if status != noErr {
       // A session that went bad (the app was in the background, say) starts over at the next key frame.
@@ -147,6 +186,20 @@ final class RelayVideo {
     self.sps = sps
     self.pps = pps
     return true
+  }
+
+  private func schedule(_ image: CVImageBuffer) {
+    lock.lock()
+    // Too far behind to wait for its turn: show it now.
+    let late = waitingFrames > 20
+    waitingFrames += 1
+    lock.unlock()
+    let wait = late ? 0 : max(0, due - CACurrentMediaTime())
+    display.asyncAfter(deadline: .now() + wait) { [weak self] in
+      guard let self else { return }
+      self.show(image)
+      self.lock.lock(); self.waitingFrames -= 1; self.lock.unlock()
+    }
   }
 
   private func show(_ image: CVImageBuffer) {

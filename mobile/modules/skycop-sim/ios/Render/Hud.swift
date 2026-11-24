@@ -113,6 +113,7 @@ final class Hud {
   static let HALF_HEIGHT: Float = 270
   private static let WHITE = 0xF2F6F7, MUTED = 0x9DB0B8, ACCENT = 0x58E6FF, WARN = 0xFFC247
   private static let DANGER = 0xFF5A4E, GOOD = 0x62E58F, PANEL = 0x0A1419
+  private static let EXIT_W: Float = 84, EXIT_H: Float = 34
   private static let ROWS = 9
   private static let ROW_HEIGHT: Float = 34, LIST_TOP: Float = -158
 
@@ -225,11 +226,27 @@ final class Hud {
     let size: Float = vr ? 13 : 15
     // Labels only for the first seconds, then the picture alone.
     let fresh = game.clock - game.liveSince < 5
+    if game.liveOnly {
+      // Only the picture; a tap brings up an Exit button in the corner for a few seconds.
+      if !game.liveHasVideo { tag("WAITING FOR VIDEO", 0, 0, size + 2, H.WARN, 0.5) }
+      exitX = w; exitY = -h
+      if game.exitShown {
+        batch.color(H.PANEL, 0.75); batch.rect(w - H.EXIT_W, -h, H.EXIT_W, H.EXIT_H)
+        batch.color(H.DANGER, 0.9); batch.rect(w - H.EXIT_W, -h + H.EXIT_H - 2, H.EXIT_W, 2)
+        batch.color(H.WHITE); batch.text("EXIT", w - H.EXIT_W / 2, -h + (H.EXIT_H - 16) / 2, 16, 0.5)
+      }
+      return
+    }
     if !game.liveHasVideo { tag("WAITING FOR VIDEO", 0, 0, size + 2, H.WARN, 0.5) } else if fresh { tag("LIVE CAMERA", -w, -h, size, H.GOOD, 0) }
     if fresh {
       tag(game.controllerName == nil ? "TAP: MENU" : "X OR B: SIMULATION   MENU: MENU", 0, h - size, size, H.MUTED, 0.5)
     }
   }
+
+  private var exitX: Float = 0, exitY: Float = 0
+
+  /// Whether a tap at this HUD point lands on the live view's Exit button (with some slack).
+  func exitHit(_ x: Float, _ y: Float) -> Bool { x > exitX - H.EXIT_W - 24 && y < exitY + H.EXIT_H + 24 }
 
   private func horizon(_ pose: DronePose) {
     let c = cos(pose.roll) * 70, s = sin(pose.roll) * 70

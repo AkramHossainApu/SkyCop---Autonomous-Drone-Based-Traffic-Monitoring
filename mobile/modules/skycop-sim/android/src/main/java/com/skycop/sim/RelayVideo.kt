@@ -10,8 +10,48 @@ import android.os.Build
 import android.util.Base64
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
+import android.os.SystemClock
+import java.util.ArrayDeque
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+
+/**
+ * Plays relay frames at the pace they were filmed. The brokers deliver them in bursts and pauses;
+ * each frame is shown at its capture time plus a delay just long enough to cover how unevenly they
+ * have been arriving lately (RelayVideo.swift has the same logic).
+ */
+internal class Pacer {
+    private val delays = LongArray(90)
+    private var count = 0
+    private var next = 0
+    private var lastDue = 0L
+    /** Extra delay after a frame came too late: the picture pauses once instead of rushing to catch up. */
+    private var shift = 0L
+
+    /** The local time (uptime ms) at which a frame captured at [captured] (camera ms) should show. */
+    fun due(captured: Long, arrived: Long): Long {
+        val raw = arrived - captured
+        // The camera started over (its clock jumped): forget what was learned.
+        if (count > 0 && kotlin.math.abs(raw - delays[(next + delays.size - 1) % delays.size]) > 4000) { count = 0; next = 0 }
+        delays[next] = raw; next = (next + 1) % delays.size; if (count < delays.size) count++
+        val sorted = delays.copyOf(count).also { it.sort() }
+        val fastest = sorted[0]
+        val slow = sorted[((count - 1) * 95) / 100]
+        val buffer = (slow - fastest + 60).coerceIn(100, 1000)
+        // Running late eases back down a little with every frame (about 30 ms a second).
+        if (shift > 0) shift = (shift - 2).coerceAtLeast(0)
+        var due = captured + fastest + buffer + shift
+        val now = SystemClock.uptimeMillis()
+        if (due < now) { shift += now - due; due = now }
+        if (due < lastDue) due = lastDue
+        if (due > now + 1500) { shift = 0; due = now }
+        lastDue = due
+        return due
+    }
+
+    fun reset() { count = 0; next = 0; lastDue = 0; shift = 0 }
+}
 
 /**
  * Decodes the H.264 video that comes through the relay (see ../../../../../../../../../src/frameRelay.ts)
@@ -20,8 +60,18 @@ import java.util.concurrent.atomic.AtomicInteger
  * A preview JPEG of the newest picture is made a few times a second for the app's own screen.
  */
 internal object RelayVideo {
-    private const val PREVIEW_MS = 160L
+    private const val PREVIEW_MS = 500L
     private val worker = Executors.newSingleThreadExecutor()
+    /** Shows decoded frames when they are due. */
+    private val display = Executors.newSingleThreadScheduledExecutor()
+    private val pacer = Pacer()
+    private val waitingFrames = AtomicInteger(0)
+    private val pool = ArrayDeque<Frame>()
+    private var due = 0L
+
+    private class Frame(val w: Int, val h: Int) {
+        val y = ByteArray(w * h); val u = ByteArray(w * h / 4); val v = ByteArray(w * h / 4)
+    }
     private val queued = AtomicInteger(0)
     private var codec: MediaCodec? = null
     private var sps: ByteArray? = null
@@ -33,13 +83,17 @@ internal object RelayVideo {
     @Volatile private var preview: String? = null
 
     /** Queues one access unit; [gap] says frames were lost before it. Returns a new preview, if any. */
-    fun push(unit: ByteArray, gap: Boolean): String? {
+    fun push(unit: ByteArray, gap: Boolean, captured: Long): String? {
+        val arrived = SystemClock.uptimeMillis()
         // A decoder that cannot keep up drops whole stretches up to the next key frame.
-        if (queued.get() > 4) dropped = true
+        if (queued.get() > 40) dropped = true
         else {
             queued.incrementAndGet()
             worker.execute {
-                try { decode(unit, gap) } catch (_: Exception) { reset() } finally { queued.decrementAndGet() }
+                try {
+                    due = pacer.due(captured, arrived)
+                    decode(unit, gap)
+                } catch (_: Exception) { reset() } finally { queued.decrementAndGet() }
             }
         }
         val out = preview
@@ -53,6 +107,7 @@ internal object RelayVideo {
     }
 
     private fun reset() {
+        pacer.reset()
         try { codec?.stop() } catch (_: Exception) {}
         try { codec?.release() } catch (_: Exception) {}
         codec = null
@@ -113,7 +168,7 @@ internal object RelayVideo {
         decoder.queueInputBuffer(input, 0, unit.size, pts, 0)
         // Baseline H.264 comes out right after it goes in; wait briefly for it, then take what is there.
         val info = MediaCodec.BufferInfo()
-        var wait = 30_000L
+        var wait = 8_000L
         while (true) {
             val output = decoder.dequeueOutputBuffer(info, wait)
             wait = 0
@@ -132,28 +187,55 @@ internal object RelayVideo {
         val w = crop.width() and 1.inv(); val h = crop.height() and 1.inv()
         if (w < 2 || h < 2 || image.planes.size < 3) return
         val p = image.planes
-        LiveFeed.putPlanes(w, h, crop.left, crop.top,
-            p[0].buffer, p[0].rowStride, p[0].pixelStride,
-            p[1].buffer, p[1].rowStride, p[1].pixelStride,
-            p[2].buffer, p[2].rowStride, p[2].pixelStride)
-        val now = System.currentTimeMillis()
-        if (now - lastPreview >= PREVIEW_MS) {
-            lastPreview = now
-            preview = jpeg(w, h, crop.left, crop.top, p)
+        val frame = synchronized(pool) { pool.pollFirst()?.takeIf { it.w == w && it.h == h } } ?: Frame(w, h)
+        copy(p[0], crop.left, crop.top, w, h, frame.y)
+        copy(p[1], crop.left / 2, crop.top / 2, w / 2, h / 2, frame.u)
+        copy(p[2], crop.left / 2, crop.top / 2, w / 2, h / 2, frame.v)
+        // Too far behind to wait for its turn: show it now.
+        val wait = if (waitingFrames.get() > 20) 0L else (due - SystemClock.uptimeMillis()).coerceAtLeast(0L)
+        waitingFrames.incrementAndGet()
+        display.schedule({
+            try { present(frame) } catch (_: Exception) {} finally {
+                waitingFrames.decrementAndGet()
+                synchronized(pool) { if (pool.size < 24) pool.addLast(frame) }
+            }
+        }, wait, TimeUnit.MILLISECONDS)
+    }
+
+    private fun copy(plane: Image.Plane, left: Int, top: Int, w: Int, h: Int, out: ByteArray) {
+        val buffer = plane.buffer; val row = plane.rowStride; val step = plane.pixelStride
+        var o = 0
+        if (step == 1) {
+            val src = buffer.duplicate()
+            for (r in 0 until h) {
+                src.position((top + r) * row + left)
+                src.get(out, o, w)
+                o += w
+            }
+        } else {
+            for (r in 0 until h) {
+                val at = (top + r) * row + left * step
+                for (c in 0 until w) out[o++] = buffer.get(at + c * step)
+            }
         }
     }
 
-    private fun jpeg(w: Int, h: Int, left: Int, top: Int, p: Array<Image.Plane>): String? {
+    private fun present(frame: Frame) {
+        LiveFeed.putI420(frame.w, frame.h, frame.y, frame.u, frame.v)
+        val now = System.currentTimeMillis()
+        if (now - lastPreview >= PREVIEW_MS) {
+            lastPreview = now
+            preview = jpeg(frame)
+        }
+    }
+
+    private fun jpeg(frame: Frame): String? {
+        val w = frame.w; val h = frame.h
         val size = w * h * 3 / 2
         if (nv21.size < size) nv21 = ByteArray(size)
-        val y = p[0].buffer; val u = p[1].buffer; val v = p[2].buffer
-        var o = 0
-        for (row in 0 until h) for (column in 0 until w) nv21[o++] = y.get((top + row) * p[0].rowStride + (left + column) * p[0].pixelStride)
-        for (row in 0 until h / 2) for (column in 0 until w / 2) {
-            val cy = top / 2 + row; val cx = left / 2 + column
-            nv21[o++] = v.get(cy * p[2].rowStride + cx * p[2].pixelStride)
-            nv21[o++] = u.get(cy * p[1].rowStride + cx * p[1].pixelStride)
-        }
+        System.arraycopy(frame.y, 0, nv21, 0, w * h)
+        var o = w * h
+        for (i in 0 until w * h / 4) { nv21[o++] = frame.v[i]; nv21[o++] = frame.u[i] }
         val out = ByteArrayOutputStream()
         if (!YuvImage(nv21, ImageFormat.NV21, w, h, null).compressToJpeg(Rect(0, 0, w, h), 60, out)) return null
         return Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)

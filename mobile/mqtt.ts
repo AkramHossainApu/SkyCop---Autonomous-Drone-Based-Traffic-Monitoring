@@ -4,6 +4,8 @@
 // no text encoders are needed. mobile/mqtt.ts is an identical copy for the phone app; keep them in step.
 
 export const MQTT_BROKERS = ['wss://broker.hivemq.com:8884/mqtt', 'wss://test.mosquitto.org:8081/mqtt'];
+/** Video goes through every one of these at once (each is free, slow and loses frames in its own way). */
+export const VIDEO_BROKERS = [...MQTT_BROKERS, 'wss://broker.emqx.io:8084/mqtt'];
 
 function ascii(text: string): number[] {
   const out: number[] = [];
@@ -56,6 +58,7 @@ export class MqttLink {
   private ping: ReturnType<typeof setInterval> | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private retry = 0;
+  private pingedAt = Date.now();
   private closed = false;
   ready = false;
 
@@ -92,6 +95,11 @@ export class MqttLink {
     };
     socket.onmessage = (event) => {
       if (this.socket !== socket || !(event.data instanceof ArrayBuffer)) return;
+      // Keep-alive also rides on incoming traffic: Android pauses JS timers while the VR view is up.
+      if (this.ready && Date.now() - this.pingedAt > 30000) {
+        this.pingedAt = Date.now();
+        socket.send(new Uint8Array([0xc0, 0]).buffer);
+      }
       const bytes = new Uint8Array(event.data);
       const joined = new Uint8Array(this.buffer.length + bytes.length);
       joined.set(this.buffer, 0);
@@ -162,7 +170,7 @@ export class MqttLink {
   private startPing(socket: WebSocket) {
     this.stopPing();
     this.ping = setInterval(() => {
-      if (socket.readyState === 1) socket.send(new Uint8Array([0xc0, 0]).buffer);
+      if (socket.readyState === 1) { this.pingedAt = Date.now(); socket.send(new Uint8Array([0xc0, 0]).buffer); }
     }, 30000);
   }
 

@@ -2,11 +2,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ICE_SERVERS, PairingChannel, waitForIceGathering, type Envelope } from './pairing';
 import { FrameSender } from './frameRelay';
 
-/** How long a direct link gets to come up before the video goes through the relay instead. */
-const DIRECT_TIMEOUT_MS = 12000;
 /** `?relay` in the page address skips the direct link, to try the relay on one network. */
-/** The phone on the relay says it is still watching every 5 s; this long without that, it is gone. */
-const RELAY_SILENCE_MS = 16000;
+/** The phone on the relay says it is still watching every 3 s; this long without that, it is gone. */
+const RELAY_SILENCE_MS = 10000;
 const FORCE_RELAY = new URLSearchParams(window.location.search).has('relay');
 
 export type BroadcastStatus = 'idle' | 'opening' | 'waiting' | 'connecting' | 'connected' | 'error';
@@ -48,12 +46,14 @@ export function useCameraBroadcast(stream: MediaStream | null, code: string) {
     relayViewerRef.current = '';
   }, []);
 
-  /** The devices cannot reach each other directly: send the video through the public brokers. */
+  /**
+   * Video through the public brokers. It starts the moment a phone asks, next to the attempt at a
+   * direct link, so the picture is up within seconds; when the direct link comes up it takes over.
+   */
   const startRelay = useCallback((viewer: string) => {
     const channel = channelRef.current;
     const media = streamRef.current;
     if (!channel || !media) return;
-    closePeer();
     stopRelay();
     relayViewerRef.current = viewer;
     viewerRef.current = viewer;
@@ -64,16 +64,14 @@ export function useCameraBroadcast(stream: MediaStream | null, code: string) {
     sender.start();
     setError('');
     setStatus('connected');
-    note('No direct route to the phone: video goes through the relay');
-  }, [closePeer, note, stopRelay]);
+    note('Video is on its way through the relay');
+  }, [note, stopRelay]);
 
   const offerTo = useCallback(async (viewer: string) => {
     const channel = channelRef.current;
     const media = streamRef.current;
     if (!channel || !media) return;
     closePeer();
-    stopRelay();
-    if (FORCE_RELAY) { startRelay(viewer); return; }
     viewerRef.current = viewer;
     offeredAtRef.current = Date.now();
     const peer = new RTCPeerConnection({ iceServers: ICE_SERVERS });
@@ -82,11 +80,14 @@ export function useCameraBroadcast(stream: MediaStream | null, code: string) {
     peer.onconnectionstatechange = () => {
       if (peerRef.current !== peer) return;
       if (peer.connectionState === 'connected') {
+        stopRelay();
         setStatus('connected');
-        note('Video is live on the phone');
+        note('Direct link up: full quality');
       } else if (peer.connectionState === 'failed') {
-        note('Direct connection failed');
-        startRelay(viewer);
+        // Different networks (Wi-Fi and mobile data) often cannot connect directly; the relay carries on.
+        note(relayRef.current ? 'No direct route; staying on the relay' : 'Direct connection failed');
+        closePeer();
+        if (!relayRef.current) startRelay(viewer);
       } else if (peer.connectionState === 'disconnected') {
         // Wi-Fi hiccups recover by themselves; only give up if it stays down.
         window.setTimeout(() => {
@@ -97,34 +98,33 @@ export function useCameraBroadcast(stream: MediaStream | null, code: string) {
         }, 4000);
       }
     };
-    setStatus('connecting');
     await peer.setLocalDescription(await peer.createOffer());
     await waitForIceGathering(peer);
     if (peerRef.current !== peer || !peer.localDescription) return;
     await channel.send('offer', { to: viewer, sdp: peer.localDescription.sdp });
-    note('Sent connection details to the phone');
-    // Different networks (Wi-Fi and mobile data) often cannot connect directly at all.
-    window.setTimeout(() => {
-      if (peerRef.current === peer && peer.connectionState !== 'connected') startRelay(viewer);
-    }, DIRECT_TIMEOUT_MS);
+    note('Trying a direct link as well');
   }, [closePeer, note, startRelay, stopRelay]);
 
   const handle = useCallback((message: Envelope) => {
     const channel = channelRef.current;
     if (!channel) return;
     if (message.type === 'hello') {
-      if (relayRef.current) {
-        // The phone that is watching through the relay missed the news: tell it again.
-        if (message.session === relayViewerRef.current) {
-          void channel.send('relay', { to: message.session }).catch(() => undefined);
-          return;
-        }
-        // The watching phone has gone quiet (closed, or the app restarted): this one takes over.
-        if (Date.now() - watchedAtRef.current > RELAY_SILENCE_MS) {
-          note('The previous phone stopped watching');
-          startRelay(message.session);
-          return;
-        }
+      const peer = peerRef.current;
+      const direct = peer?.connectionState === 'connected';
+      const watching = Boolean(relayRef.current) || direct;
+      const same = message.session === viewerRef.current;
+      if (watching && same && relayRef.current) {
+        // The watching phone missed the news, or the app was reopened: the video is already flowing.
+        watchedAtRef.current = Date.now();
+        relayRef.current.keyFrame();
+        void channel.send('relay', { to: message.session }).catch(() => undefined);
+        return;
+      }
+      // (A phone on a working direct link never says hello: one that does was reopened, so start over.)
+      // One phone at a time: a second phone waits until the first leaves or drops, instead of the
+      // two taking the stream from each other in turn. A relay viewer that went quiet has left.
+      const quiet = relayRef.current && !direct && Date.now() - watchedAtRef.current > RELAY_SILENCE_MS;
+      if (watching && !same && !quiet) {
         if (!refusedRef.current.has(message.session)) {
           refusedRef.current.add(message.session);
           note('Another phone tried to join; it can connect when this one leaves');
@@ -132,31 +132,21 @@ export function useCameraBroadcast(stream: MediaStream | null, code: string) {
         return;
       }
       // A phone may say hello twice while one offer is in flight; answering both would race.
-      const peer = peerRef.current;
-      const busy = peer && message.session === viewerRef.current &&
-        (peer.connectionState === 'connected' || Date.now() - offeredAtRef.current < 8000);
-      if (busy) return;
-      // One phone at a time: a second phone waits until the first leaves or drops, instead of the
-      // two taking the stream from each other in turn.
-      if (peer && peer.connectionState === 'connected' && message.session !== viewerRef.current) {
-        if (!refusedRef.current.has(message.session)) {
-          refusedRef.current.add(message.session);
-          note('Another phone tried to join; it can connect when this one leaves');
-        }
-        return;
-      }
-      note('Phone asked to join');
+      if (peer && message.session === viewerRef.current && Date.now() - offeredAtRef.current < 8000) return;
+      note(quiet ? 'The previous phone stopped watching; a new phone joins' : 'Phone asked to join');
       setError('');
-      void offerTo(message.session).catch(() => {
-        setError('Could not prepare the video connection. Try again.');
-        setStatus('waiting');
-      });
+      startRelay(message.session);
+      if (FORCE_RELAY) return;
+      void offerTo(message.session).catch(() => note('Could not prepare a direct link; staying on the relay'));
     } else if (message.type === 'answer' && message.to === channel.session && message.session === viewerRef.current && message.sdp) {
       void peerRef.current?.setRemoteDescription({ type: 'answer', sdp: message.sdp }).catch(() => {
         setError('The phone sent connection details this browser could not use.');
       });
     } else if (message.type === 'watching' && message.session === relayViewerRef.current) {
       watchedAtRef.current = Date.now();
+    } else if (message.type === 'key' && message.session === relayViewerRef.current) {
+      // The phone lost a frame and waits for a key frame to go on.
+      relayRef.current?.keyFrame();
     } else if (message.type === 'bye' && message.session === viewerRef.current) {
       note('Phone left');
       closePeer();

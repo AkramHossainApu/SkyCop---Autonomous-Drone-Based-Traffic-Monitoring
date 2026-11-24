@@ -21,7 +21,7 @@ declare class SkyCopSimModule extends NativeModule<Events> {
    */
   openFrame(keyHex: string, sealed: string): string | null;
   /** Decrypts and decodes one H.264 access unit from the relay; returns a preview JPEG (base64) when a new one is ready. */
-  openVideo(keyHex: string, sealed: string, gap: boolean): string | null;
+  openVideo(keyHex: string, sealed: string, gap: boolean, capturedMs: number): string | null;
   /** Frees the relay's video decoder. */
   closeVideo(): void;
   loadValue(key: string): string | null;

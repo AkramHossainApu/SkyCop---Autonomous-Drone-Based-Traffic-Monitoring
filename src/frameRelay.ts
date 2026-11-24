@@ -3,23 +3,31 @@
 // needed: the video goes, encrypted, through the same free public MQTT brokers that carry the
 // pairing messages.
 //
-// Those brokers only pass about 30-50 kB/s per connection and silently drop what does not fit, so
-// the video is real H.264 (WebCodecs) at about 220 kb/s and 15 frames a second, sent as raw bytes:
-// a tenth of what the same picture costs as JPEG frames. Browsers without an H.264 encoder fall back
-// to a few small JPEG frames a second.
+// Those brokers only pass about 30-50 kB/s per connection, at their own whim, and silently drop what
+// does not fit, so the video is real H.264 (WebCodecs) at about 240 kb/s and 15 frames a second, sent
+// as raw bytes: a tenth of what the same picture costs as JPEG frames. Each encrypted frame is cut in
+// two halves plus their XOR, one piece per broker: any two pieces rebuild it, so one broker that
+// stalls or drops costs nothing, and each carries only half the video. Browsers without an H.264
+// encoder fall back to a few small JPEG frames a second.
 //
-// Wire format, one MQTT message per frame:
-//   v1.<seq>.<sealed bytes>   H.264 access unit in Annex B form (SPS and PPS ahead of every key frame)
+// Wire format, one MQTT message per piece:
+//   v3.<seq>.<ms>.<piece>.<length>.<bytes>  piece 0 and 1 are the halves of the sealed frame, piece 2
+//       their XOR; <length> is the sealed frame's length. The frame is an H.264 access unit in Annex B
+//       form (SPS and PPS ahead of every key frame); <ms> is the capture time, so the phone can play
+//       the frames at the pace they were filmed instead of the pace they arrived.
 //   f1.<seq>.<sealed base64>  JPEG frame (fallback)
 
-import { MQTT_BROKERS, MqttLink } from './mqtt';
+import { MqttLink, VIDEO_BROKERS } from './mqtt';
 
 /** Most pixels per frame: 640x360 landscape, 480x480 square. */
 const VIDEO_PIXELS = 640 * 360;
 const VIDEO_FPS = 15;
-const VIDEO_BITRATE = 220_000;
-/** A key frame every ~1.6 s, so a frame the brokers dropped freezes the picture no longer than that. */
-const KEY_EVERY = 24;
+const VIDEO_BITRATE = 240_000;
+/**
+ * A key frame every 1.2 s, so a frame lost on every broker freezes the picture no longer than that
+ * (the phone also asks for one straight away when it notices a loss).
+ */
+const KEY_EVERY = 18;
 /** Constrained baseline: no B-frames, which every phone decoder takes with no delay. */
 const CODECS = ['avc1.42E01F', 'avc1.42001F', 'avc1.42E01E'];
 
@@ -109,7 +117,6 @@ export class FrameSender {
   private sentFrames = 0;
   private sentBytes = 0;
   private windowStart = performance.now();
-  private link: MqttLink | null = null;
   /** Publishing waits on encryption; this keeps the frames in order. */
   private chain: Promise<void> = Promise.resolve();
   private encoder: VideoEncoder | null = null;
@@ -124,7 +131,7 @@ export class FrameSender {
     private readonly sealRaw: (bytes: Uint8Array) => Promise<Uint8Array>,
     source: MediaStream,
   ) {
-    this.links = MQTT_BROKERS.map((url) => new MqttLink(url, topic, () => undefined, () => undefined, false));
+    this.links = VIDEO_BROKERS.map((url) => new MqttLink(url, topic, () => undefined, () => undefined, false));
     this.video.muted = true;
     this.video.playsInline = true;
     this.video.srcObject = source;
@@ -150,10 +157,8 @@ export class FrameSender {
 
   private async tick() {
     if (this.busy || this.stopped || this.video.videoWidth === 0 || this.video.videoHeight === 0) return;
-    // One broker at a time; the phone listens on all of them. Moving to another one starts with a key frame.
-    const link = this.links.find((candidate) => candidate.ready && candidate.backlog < MAX_BACKLOG) ?? null;
-    if (!link) return;
-    if (link !== this.link) { this.link = link; this.sinceKey = KEY_EVERY; }
+    // Every frame goes through every broker that keeps up; the phone takes whichever copy comes first.
+    if (!this.links.some((link) => link.ready && link.backlog < MAX_BACKLOG)) return;
     this.busy = true;
     try {
       if (this.mode === 'probe') {
@@ -218,9 +223,10 @@ export class FrameSender {
     // Without an avcC record the encoder already wrote start codes (some browsers ignore format: 'avc').
     const unit = this.avc ? annexB(data, this.avc.lengthSize, key ? this.avc.params : null) : data;
     const seq = ++this.seq;
+    const ms = Math.round(chunk.timestamp / 1000);
     this.chain = this.chain.then(async () => {
       const sealed = await this.sealRaw(unit);
-      this.publish(latin1(`v1.${seq}.`, sealed), sealed.length);
+      this.publishPieces(seq, ms, sealed);
     }).catch(() => undefined);
   }
 
@@ -239,8 +245,35 @@ export class FrameSender {
     this.publish(`f1.${++this.seq}.${sealed}`, sealed.length);
   }
 
+  /** Two halves and their XOR, one per broker; a broker that is down or behind hands its piece on. */
+  private publishPieces(seq: number, ms: number, sealed: Uint8Array) {
+    if (this.stopped) return;
+    const half = Math.ceil(sealed.length / 2);
+    const a = sealed.subarray(0, half);
+    const b = new Uint8Array(half);
+    b.set(sealed.subarray(half));
+    const x = new Uint8Array(half);
+    for (let i = 0; i < half; i++) x[i] = a[i] ^ b[i];
+    const usable = this.links.filter((link) => link.ready && link.backlog < MAX_BACKLOG);
+    if (usable.length === 0) return;
+    [a, b, x].forEach((piece, i) => {
+      const own = this.links[i];
+      const link = usable.includes(own) ? own : usable[i % usable.length];
+      link.publish(latin1(`v3.${seq}.${ms}.${i}.${sealed.length}.`, piece));
+    });
+    this.count(sealed.length);
+  }
+
   private publish(payload: string, bytes: number) {
-    if (this.stopped || !this.link?.publish(payload)) return;
+    if (this.stopped) return;
+    let sent = false;
+    for (const link of this.links) {
+      if (link.ready && link.backlog < MAX_BACKLOG && link.publish(payload)) sent = true;
+    }
+    if (sent) this.count(bytes);
+  }
+
+  private count(bytes: number) {
     this.sentFrames++;
     this.sentBytes += bytes;
     const now = performance.now();
@@ -249,6 +282,11 @@ export class FrameSender {
       this.stats = { ...this.stats, fps: Math.round(this.sentFrames / seconds), kbps: Math.round((this.sentBytes * 8) / 1000 / seconds) };
       this.sentFrames = 0; this.sentBytes = 0; this.windowStart = now;
     }
+  }
+
+  /** The next frame is a key frame, so a phone that just (re)joined has a picture at once. */
+  keyFrame() {
+    this.sinceKey = KEY_EVERY;
   }
 
   stop() {

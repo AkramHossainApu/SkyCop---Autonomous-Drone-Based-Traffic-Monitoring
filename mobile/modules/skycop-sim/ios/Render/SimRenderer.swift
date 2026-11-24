@@ -187,7 +187,7 @@ final class SimRenderer: NSObject, MTKViewDelegate {
     game.liveAvailable = LiveFeed.shared.available
     if startLive {
       startLive = false
-      game.watchLive()
+      game.watchLive(only: true)
     }
     head.orientation = view.window?.windowScene?.interfaceOrientation ?? .landscapeRight
     let tracked = settings.headTracking && settings.vr && head.available
@@ -298,6 +298,8 @@ final class SimRenderer: NSObject, MTKViewDelegate {
 
   /// A tap in the headset opens the menu; in the menu it picks the row under the finger.
   func tap(_ px: Float, _ py: Float, _ width: Float, _ height: Float) -> Int {
+    // A tap while the live view is still opening must not count as a press in it (Start would exit).
+    if startLive { return 0 }
     if game.screen != .flight && game.screen != .menu { game.back(); return 0 }
     let eyes = settings.vr ? 2 : 1
     let eyeWidth = width / Float(eyes)
@@ -306,6 +308,10 @@ final class SimRenderer: NSObject, MTKViewDelegate {
     let y = py / height * 2 - 1
     let aspect = eyeWidth / height
     let hudX = x * Hud.HALF_HEIGHT * aspect / hud.scale, hudY = y * Hud.HALF_HEIGHT / hud.scale
+    if game.screen == .flight && game.watchingLive && game.liveOnly {
+      game.liveTap(onExit: hud.exitHit(hudX, hudY))
+      return 0
+    }
     if game.screen == .flight { return settings.vr || game.watchingLive ? Button.START : 0 }
     let row = hud.menuRowAt(hudX, hudY)
     if row >= 0 { game.activate(row) }
