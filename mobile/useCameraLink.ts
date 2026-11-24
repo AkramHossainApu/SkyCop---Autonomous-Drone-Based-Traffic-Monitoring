@@ -30,7 +30,7 @@ export function useCameraLink() {
   const lastFrameAt = useRef(0);
   const [status, setStatus] = useState<LinkStatus>('idle');
   const [stream, setStream] = useState<MediaStream | null>(null);
-  /** The newest frame (base64 JPEG) while the video comes through the relay, else null. */
+  /** A recent picture (base64 JPEG) while the video comes through the relay, else null. */
   const [relayFrame, setRelayFrame] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [code, setCode] = useState('');
@@ -115,10 +115,19 @@ export function useCameraLink() {
     cameraRef.current = camera;
     lastFrameAt.current = Date.now();
     setStatus('connecting');
-    const receiver = new FrameReceiver(channel.frameTopic, channel.keyHex, (jpeg) => {
+    let toldAt = 0;
+    const receiver = new FrameReceiver(channel.frameTopic, channel.keyHex, (preview) => {
       if (relayRef.current !== receiver) return;
-      lastFrameAt.current = Date.now();
-      setRelayFrame(jpeg);
+      const now = Date.now();
+      lastFrameAt.current = now;
+      // Tell the camera every 5 s that this phone is still watching (the relay is one-way). This rides
+      // on arriving frames, not a timer: Android pauses JS timers while the VR screen is in front.
+      if (now - toldAt > 5000) {
+        toldAt = now;
+        void channel.send('watching').catch(() => undefined);
+      }
+      if (!preview) return;
+      setRelayFrame(preview);
       setStatus('live');
       setError('');
     });

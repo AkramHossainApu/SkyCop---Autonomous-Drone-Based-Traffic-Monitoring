@@ -5,6 +5,8 @@ import { FrameSender } from './frameRelay';
 /** How long a direct link gets to come up before the video goes through the relay instead. */
 const DIRECT_TIMEOUT_MS = 12000;
 /** `?relay` in the page address skips the direct link, to try the relay on one network. */
+/** The phone on the relay says it is still watching every 5 s; this long without that, it is gone. */
+const RELAY_SILENCE_MS = 16000;
 const FORCE_RELAY = new URLSearchParams(window.location.search).has('relay');
 
 export type BroadcastStatus = 'idle' | 'opening' | 'waiting' | 'connecting' | 'connected' | 'error';
@@ -20,6 +22,8 @@ export function useCameraBroadcast(stream: MediaStream | null, code: string) {
   const refusedRef = useRef(new Set<string>());
   const relayRef = useRef<FrameSender | null>(null);
   const relayViewerRef = useRef('');
+  /** When the phone watching through the relay last said it still is (the relay itself is one-way). */
+  const watchedAtRef = useRef(0);
   const streamRef = useRef(stream);
   streamRef.current = stream;
   const [status, setStatus] = useState<BroadcastStatus>('idle');
@@ -53,8 +57,9 @@ export function useCameraBroadcast(stream: MediaStream | null, code: string) {
     stopRelay();
     relayViewerRef.current = viewer;
     viewerRef.current = viewer;
+    watchedAtRef.current = Date.now();
     void channel.send('relay', { to: viewer }).catch(() => undefined);
-    const sender = new FrameSender(channel.frameTopic, (bytes) => channel.sealBytes(bytes), media);
+    const sender = new FrameSender(channel.frameTopic, (bytes) => channel.sealRaw(bytes), media);
     relayRef.current = sender;
     sender.start();
     setError('');
@@ -110,8 +115,17 @@ export function useCameraBroadcast(stream: MediaStream | null, code: string) {
     if (message.type === 'hello') {
       if (relayRef.current) {
         // The phone that is watching through the relay missed the news: tell it again.
-        if (message.session === relayViewerRef.current) void channel.send('relay', { to: message.session }).catch(() => undefined);
-        else if (!refusedRef.current.has(message.session)) {
+        if (message.session === relayViewerRef.current) {
+          void channel.send('relay', { to: message.session }).catch(() => undefined);
+          return;
+        }
+        // The watching phone has gone quiet (closed, or the app restarted): this one takes over.
+        if (Date.now() - watchedAtRef.current > RELAY_SILENCE_MS) {
+          note('The previous phone stopped watching');
+          startRelay(message.session);
+          return;
+        }
+        if (!refusedRef.current.has(message.session)) {
           refusedRef.current.add(message.session);
           note('Another phone tried to join; it can connect when this one leaves');
         }
@@ -141,13 +155,15 @@ export function useCameraBroadcast(stream: MediaStream | null, code: string) {
       void peerRef.current?.setRemoteDescription({ type: 'answer', sdp: message.sdp }).catch(() => {
         setError('The phone sent connection details this browser could not use.');
       });
+    } else if (message.type === 'watching' && message.session === relayViewerRef.current) {
+      watchedAtRef.current = Date.now();
     } else if (message.type === 'bye' && message.session === viewerRef.current) {
       note('Phone left');
       closePeer();
       stopRelay();
       setStatus('waiting');
     }
-  }, [closePeer, note, offerTo, stopRelay]);
+  }, [closePeer, note, offerTo, startRelay, stopRelay]);
 
   const stop = useCallback(() => {
     const channel = channelRef.current;
@@ -211,6 +227,13 @@ export function useCameraBroadcast(stream: MediaStream | null, code: string) {
     const timer = window.setInterval(async () => {
       const relay = relayRef.current;
       if (relay) {
+        // Nobody has watched for a minute: stop uploading and wait for a phone again.
+        if (Date.now() - watchedAtRef.current > 60000) {
+          note('The phone stopped watching');
+          stopRelay();
+          setStatus('waiting');
+          return;
+        }
         setStats({ ...relay.stats, rttMs: null, route: 'through the relay' });
         return;
       }
@@ -233,7 +256,7 @@ export function useCameraBroadcast(stream: MediaStream | null, code: string) {
       setStats(next);
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [status]);
+  }, [note, status, stopRelay]);
 
   return { status, error, log, stats, start, stop, note };
 }

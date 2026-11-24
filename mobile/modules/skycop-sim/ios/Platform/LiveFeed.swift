@@ -109,6 +109,30 @@ final class LiveFeed: NSObject, RTCVideoRenderer {
     }
   }
 
+  /// A decoded relay picture in VideoToolbox's NV12 layout, split into the I420 planes used here.
+  func putNV12(_ w: Int, _ h: Int, _ yPlane: UnsafePointer<UInt8>, _ yStride: Int, _ cPlane: UnsafePointer<UInt8>, _ cStride: Int) {
+    let cw = w / 2, ch = h / 2
+    lock.lock()
+    defer { lock.unlock() }
+    if tag != LiveFeed.RELAY { return }
+    Self.pack(yPlane, yStride, w, h, &y)
+    if u.count != cw * ch { u = [UInt8](repeating: 0, count: cw * ch) }
+    if v.count != cw * ch { v = [UInt8](repeating: 0, count: cw * ch) }
+    u.withUnsafeMutableBufferPointer { pu in
+      v.withUnsafeMutableBufferPointer { pv in
+        for row in 0..<ch {
+          let line = cPlane + row * cStride
+          for column in 0..<cw {
+            pu[row * cw + column] = line[column * 2]
+            pv[row * cw + column] = line[column * 2 + 1]
+          }
+        }
+      }
+    }
+    width = w; height = h; rotation = 0
+    serial += 1
+  }
+
   private static func pack(_ source: UnsafePointer<UInt8>, _ stride: Int, _ w: Int, _ h: Int, _ out: inout [UInt8]) {
     if out.count != w * h { out = [UInt8](repeating: 0, count: w * h) }
     out.withUnsafeMutableBufferPointer { target in

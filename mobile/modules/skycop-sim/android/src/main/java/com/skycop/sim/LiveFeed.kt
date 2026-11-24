@@ -120,6 +120,42 @@ internal object LiveFeed : VideoSink {
         }
     }
 
+    /** A decoded relay picture (YUV 4:2:0 planes with any strides, as MediaCodec gives them). */
+    fun putPlanes(w: Int, h: Int, left: Int, top: Int,
+                  yb: ByteBuffer, yRow: Int, yPix: Int, ub: ByteBuffer, uRow: Int, uPix: Int, vb: ByteBuffer, vRow: Int, vPix: Int) {
+        val cw = w / 2; val ch = h / 2
+        synchronized(lock) {
+            if (tag != RELAY) return
+            if (y.capacity() < w * h) y = ByteBuffer.allocateDirect(w * h)
+            if (u.capacity() < cw * ch) u = ByteBuffer.allocateDirect(cw * ch)
+            if (v.capacity() < cw * ch) v = ByteBuffer.allocateDirect(cw * ch)
+            plane(yb, yRow, yPix, left, top, w, h, y)
+            plane(ub, uRow, uPix, left / 2, top / 2, cw, ch, u)
+            plane(vb, vRow, vPix, left / 2, top / 2, cw, ch, v)
+            width = w; height = h; rotation = 0
+            serial++
+        }
+    }
+
+    private fun plane(source: ByteBuffer, rowStride: Int, pixelStride: Int, left: Int, top: Int, w: Int, h: Int, out: ByteBuffer) {
+        out.clear()
+        val src = source.duplicate()
+        if (pixelStride == 1) {
+            for (row in 0 until h) {
+                val at = (top + row) * rowStride + left
+                src.limit(at + w).position(at)
+                out.put(src)
+                src.limit(src.capacity())
+            }
+        } else {
+            for (row in 0 until h) {
+                val at = (top + row) * rowStride + left * pixelStride
+                for (column in 0 until w) out.put(src.get(at + column * pixelStride))
+            }
+        }
+        out.flip()
+    }
+
     private fun pack(source: ByteBuffer, stride: Int, w: Int, h: Int, out: ByteBuffer) {
         out.clear()
         val src = source.duplicate()

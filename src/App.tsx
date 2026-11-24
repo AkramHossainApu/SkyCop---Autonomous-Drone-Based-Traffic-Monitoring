@@ -280,7 +280,7 @@ function Station() {
       </main>
 
       <footer className="footer">
-        <span>The pairing relay only ever sees encrypted connection details; video goes directly between the devices.</span>
+        <span>Everything that passes through the public relay is encrypted with the pairing code. On the same network the video goes directly between the devices.</span>
         <span>SkyCop 0.2</span>
       </footer>
     </div>

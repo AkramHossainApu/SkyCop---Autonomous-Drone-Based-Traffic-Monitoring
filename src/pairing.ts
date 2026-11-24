@@ -21,7 +21,7 @@ export type Envelope = {
   from: Role;
   session: string;
   at: number;
-  type: 'ready' | 'hello' | 'offer' | 'answer' | 'bye' | 'relay';
+  type: 'ready' | 'hello' | 'offer' | 'answer' | 'bye' | 'relay' | 'watching';
   to?: string;
   sdp?: string;
 };
@@ -96,12 +96,17 @@ export class PairingChannel {
 
   /** Encrypts bytes with the pairing key: base64 of iv + ciphertext + tag, as the phone's native open() expects. */
   async sealBytes(bytes: Uint8Array): Promise<string> {
+    return toBase64(await this.sealRaw(bytes));
+  }
+
+  /** The same as sealBytes without the base64, for video that goes over the wire as raw bytes. */
+  async sealRaw(bytes: Uint8Array): Promise<Uint8Array> {
     if (!this.key) throw new Error('Not open');
     const iv = crypto.getRandomValues(new Uint8Array(12));
-    const cipher = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, this.key, bytes);
+    const cipher = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, this.key, bytes as BufferSource);
     const sealed = new Uint8Array(12 + cipher.byteLength);
     sealed.set(iv); sealed.set(new Uint8Array(cipher), 12);
-    return toBase64(sealed);
+    return sealed;
   }
 
   constructor(

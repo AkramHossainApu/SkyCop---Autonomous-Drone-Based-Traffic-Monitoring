@@ -64,6 +64,14 @@ public class SkyCopSimModule: Module {
       return jpeg.base64EncodedString()
     }
 
+    Function("openVideo") { (keyHex: String, sealed: String, gap: Bool) -> String? in
+      guard let data = Data(base64Encoded: sealed), let box = try? AES.GCM.SealedBox(combined: data),
+            let unit = try? AES.GCM.open(box, using: SymmetricKey(data: Self.bytes(keyHex))) else { return nil }
+      return RelayVideo.shared.push(unit, gap: gap)
+    }
+
+    Function("closeVideo") { RelayVideo.shared.close() }
+
     Function("loadValue") { (key: String) -> String? in UserDefaults.standard.string(forKey: "skycop-app.\(key)") }
     Function("saveValue") { (key: String, value: String) in UserDefaults.standard.set(value, forKey: "skycop-app.\(key)") }
   }
