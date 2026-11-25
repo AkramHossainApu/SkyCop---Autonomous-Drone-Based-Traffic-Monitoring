@@ -1,4 +1,6 @@
-import { requireOptionalNativeModule, type NativeModule } from 'expo';
+import { requireNativeView, requireOptionalNativeModule, type NativeModule } from 'expo';
+import type { ComponentType } from 'react';
+import type { ViewProps } from 'react-native';
 
 export type SimulationResult = 'exit' | 'error';
 export type ControllerButton = 'x' | 'b';
@@ -29,3 +31,12 @@ declare class SkyCopSimModule extends NativeModule<Events> {
 }
 
 export default requireOptionalNativeModule<SkyCopSimModule>('SkyCopSim');
+
+/** Relay video drawn natively from the same pictures the VR view gets, so it moves as smoothly. */
+export const RelayPreview: ComponentType<ViewProps> | null = (() => {
+  try {
+    return requireNativeView<ViewProps>('SkyCopSim');
+  } catch {
+    return null;
+  }
+})();

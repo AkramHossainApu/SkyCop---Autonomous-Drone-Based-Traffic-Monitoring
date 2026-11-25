@@ -72,6 +72,9 @@ public class SkyCopSimModule: Module {
 
     Function("closeVideo") { RelayVideo.shared.close() }
 
+    // The app's preview of relay video, drawn natively from the same pictures VR shows.
+    View(RelayPreviewView.self) {}
+
     Function("loadValue") { (key: String) -> String? in UserDefaults.standard.string(forKey: "skycop-app.\(key)") }
     Function("saveValue") { (key: String, value: String) in UserDefaults.standard.set(value, forKey: "skycop-app.\(key)") }
   }

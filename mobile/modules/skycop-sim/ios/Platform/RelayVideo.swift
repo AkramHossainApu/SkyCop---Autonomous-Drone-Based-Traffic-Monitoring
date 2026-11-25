@@ -19,8 +19,8 @@ final class Pacer {
     if count > 0 && abs(raw - delays[(next + delays.count - 1) % delays.count]) > 4000 { count = 0; next = 0 }
     delays[next] = raw; next = (next + 1) % delays.count; if count < delays.count { count += 1 }
     let sorted = delays[0..<count].sorted()
-    let fastest = sorted[0], slow = sorted[((count - 1) * 95) / 100]
-    let buffer = min(1000, max(100, slow - fastest + 60))
+    let fastest = sorted[0], slow = sorted[((count - 1) * 90) / 100]
+    let buffer = min(1000, max(100, slow - fastest + 40))
     // Running late eases back down a little with every frame (about 30 ms a second).
     if shift > 0 { shift = max(0, shift - 0.002) }
     var due = (captured + fastest + buffer) / 1000 + shift
@@ -40,7 +40,8 @@ final class Pacer {
 /// SPS and PPS. A preview JPEG of the newest picture is made a few times a second for the app's screen.
 final class RelayVideo {
   static let shared = RelayVideo()
-  private static let previewInterval = 0.5
+  /// Only tells the app that pictures are coming: RelayPreviewView draws the moving preview.
+  private static let previewInterval = 1.5
 
   private let worker = DispatchQueue(label: "SkyCopRelayVideo")
   private let lock = NSLock()

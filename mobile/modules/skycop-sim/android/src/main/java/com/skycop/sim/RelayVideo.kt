@@ -37,8 +37,8 @@ internal class Pacer {
         delays[next] = raw; next = (next + 1) % delays.size; if (count < delays.size) count++
         val sorted = delays.copyOf(count).also { it.sort() }
         val fastest = sorted[0]
-        val slow = sorted[((count - 1) * 95) / 100]
-        val buffer = (slow - fastest + 60).coerceIn(100, 1000)
+        val slow = sorted[((count - 1) * 90) / 100]
+        val buffer = (slow - fastest + 40).coerceIn(100, 1000)
         // Running late eases back down a little with every frame (about 30 ms a second).
         if (shift > 0) shift = (shift - 2).coerceAtLeast(0)
         var due = captured + fastest + buffer + shift
@@ -60,7 +60,8 @@ internal class Pacer {
  * A preview JPEG of the newest picture is made a few times a second for the app's own screen.
  */
 internal object RelayVideo {
-    private const val PREVIEW_MS = 500L
+    /** Only tells the app that pictures are coming: RelayPreviewView draws the moving preview. */
+    private const val PREVIEW_MS = 1500L
     private val worker = Executors.newSingleThreadExecutor()
     /** Shows decoded frames when they are due. */
     private val display = Executors.newSingleThreadScheduledExecutor()

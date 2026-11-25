@@ -75,6 +75,8 @@ class SkyCopSimModule : Module() {
             if (unit == null) null else RelayVideo.push(unit, gap, capturedMs.toLong())
         }
         Function("closeVideo") { RelayVideo.close() }
+        // The app's preview of relay video, drawn natively from the same pictures VR shows.
+        View(RelayPreviewView::class) {}
         Function("loadValue") { key: String ->
             appContext.reactContext?.getSharedPreferences("skycop-app", android.content.Context.MODE_PRIVATE)?.getString(key, null)
         }

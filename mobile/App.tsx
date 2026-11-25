@@ -3,7 +3,7 @@ import { StatusBar } from 'expo-status-bar';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import { useEffect, useRef, useState } from 'react';
 import { Image, Linking, Platform, Pressable, ScrollView, StatusBar as NativeStatusBar, StyleSheet, Text, TextInput, View } from 'react-native';
-import SkyCopSim, { type ControllerButton } from './modules/skycop-sim';
+import SkyCopSim, { RelayPreview, type ControllerButton } from './modules/skycop-sim';
 import QrScanner, { ScanGlyph } from './QrScanner';
 import RemoteVideo from './RemoteVideo';
 import { CODE_PATTERN, formatTyping, normalizeCode } from './pairing';
@@ -145,7 +145,9 @@ export default function App() {
 
         <View style={styles.panel}>
           <View style={styles.viewport}>
-            {link.stream ? <RemoteVideo stream={link.stream} fit="contain" /> : link.relayFrame ? (
+            {link.stream ? <RemoteVideo stream={link.stream} fit="contain" /> : link.relayFrame && RelayPreview ? (
+              <RelayPreview style={StyleSheet.absoluteFill} accessibilityLabel="Live camera, through the relay" />
+            ) : link.relayFrame ? (
               <Image
                 source={{ uri: `data:image/jpeg;base64,${link.relayFrame}` }}
                 style={StyleSheet.absoluteFill}
@@ -159,10 +161,6 @@ export default function App() {
               </View>
             )}
             {live && <View style={styles.pill}><Text style={styles.pillText}>Live</Text></View>}
-            {live && !link.stream && (
-              // Through the relay the preview here is a still now and then; the VR view gets every frame.
-              <View style={styles.relayNote}><Text style={styles.relayNoteText}>Preview · full motion in VR</Text></View>
-            )}
           </View>
           <View style={styles.panelFoot}>
             <Pressable
@@ -271,8 +269,6 @@ const styles = StyleSheet.create({
   viewportText: { color: color.faint, fontSize: 14 },
   pill: { position: 'absolute', top: 12, left: 12, height: 24, paddingHorizontal: 10, borderRadius: 12, backgroundColor: color.positiveBg, justifyContent: 'center' },
   pillText: { color: color.positive, fontSize: 12, fontWeight: '600' },
-  relayNote: { position: 'absolute', right: 12, bottom: 12, backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: 999, paddingHorizontal: 10, paddingVertical: 4 },
-  relayNoteText: { color: '#E8ECEF', fontSize: 12, fontWeight: '600' },
   panelFoot: { padding: 16 },
   h2: { color: color.text, fontSize: 16, lineHeight: 24, fontWeight: '600' },
   label: { color: color.faint, fontSize: 12, marginTop: 16, marginBottom: 6 },

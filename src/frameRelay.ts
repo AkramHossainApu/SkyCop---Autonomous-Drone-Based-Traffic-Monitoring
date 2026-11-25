@@ -4,7 +4,7 @@
 // pairing messages.
 //
 // Those brokers only pass about 30-50 kB/s per connection, at their own whim, and silently drop what
-// does not fit, so the video is real H.264 (WebCodecs) at about 240 kb/s and 15 frames a second, sent
+// does not fit, so the video is real H.264 (WebCodecs) at about 160 kb/s and 15 frames a second, sent
 // as raw bytes: a tenth of what the same picture costs as JPEG frames. Each encrypted frame is cut in
 // two halves plus their XOR, one piece per broker: any two pieces rebuild it, so one broker that
 // stalls or drops costs nothing, and each carries only half the video. Browsers without an H.264
@@ -22,14 +22,23 @@ import { MqttLink, VIDEO_BROKERS } from './mqtt';
 /** Most pixels per frame: 640x360 landscape, 480x480 square. */
 const VIDEO_PIXELS = 640 * 360;
 const VIDEO_FPS = 15;
-const VIDEO_BITRATE = 240_000;
 /**
- * A key frame every 1.2 s, so a frame lost on every broker freezes the picture no longer than that
- * (the phone also asks for one straight away when it notices a loss).
+ * Measured on the three brokers: at 160 kb/s every frame arrived, half of them within 0.3 s; at 200
+ * kb/s some were dropped and the slow ones took over a second; at 400 a quarter were lost. Above
+ * this the brokers throttle and the picture gets later and later, so it stays here.
  */
-const KEY_EVERY = 18;
-/** Constrained baseline: no B-frames, which every phone decoder takes with no delay. */
-const CODECS = ['avc1.42E01F', 'avc1.42001F', 'avc1.42E01E'];
+const VIDEO_BITRATE = 160_000;
+/**
+ * A key frame every 4 s. Key frames cost several times a normal frame, so fewer of them leave more of
+ * the brokers' small bandwidth for a sharper picture; a frame lost on every broker does not have to
+ * wait for the next one, because the phone asks for a key frame straight away when it notices a loss.
+ */
+const KEY_EVERY = 60;
+/**
+ * Main profile first (CABAC: the same picture in about a tenth fewer bits), then constrained baseline.
+ * Real-time encoding uses no B-frames in either, so every phone decoder shows each frame at once.
+ */
+const CODECS = ['avc1.4D401F', 'avc1.42E01F', 'avc1.42001F', 'avc1.42E01E'];
 
 const JPEG_WIDTH = 480;
 const JPEG_QUALITY = 0.5;
